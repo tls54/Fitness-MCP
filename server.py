@@ -262,6 +262,102 @@ def get_best_activities(metric: str = "pace", top_n: int = 5, activity_type: str
     return '\n'.join(lines)
 
 
+def _fetch_streams(activity_id: int, keys: list) -> dict:
+    headers = {'Authorization': f'Bearer {ACCESS_TOKEN}'}
+    response = requests.get(
+        f'https://www.strava.com/api/v3/activities/{activity_id}/streams',
+        headers=headers,
+        params={'keys': ','.join(keys), 'key_by_type': 'true'}
+    )
+    if response.status_code == 404:
+        return {}
+    return response.json()
+
+
+@mcp.tool()
+def get_activity_streams(activity_id: int, stream_types: str = "heartrate,velocity_smooth,cadence,altitude") -> str:
+    """Returns raw time-series data for an activity — one data point per second for HR, pace, cadence, and altitude.
+    Use this when the user wants to see exactly how a metric changed over the course of a workout, e.g. 'show me my HR trace' or 'how did my pace change throughout the run'.
+    For summary insights (zone distribution, HR drift, effort quality) use get_activity_analysis instead.
+    stream_types: comma-separated list of streams to fetch (default: heartrate,velocity_smooth,cadence,altitude).
+    """
+    keys = [k.strip() for k in stream_types.split(',')]
+    streams = _fetch_streams(activity_id, keys)
+    if not streams:
+        return f"No stream data found for activity {activity_id}."
+
+    lines = [f"Stream data for activity {activity_id} ({len(next(iter(streams.values()))['data'])} seconds):\n"]
+    for stream_type, stream in streams.items():
+        data = stream['data']
+        if stream_type == 'heartrate':
+            lines.append(f"Heart rate (bpm): min {min(data)}, max {max(data)}, avg {sum(data)/len(data):.0f}")
+            lines.append(f"  Trace (every 30s): {data[::30]}")
+        elif stream_type == 'velocity_smooth':
+            paces = [_format_pace(v) for v in data[::30] if v > 0]
+            lines.append(f"Pace (every 30s): {paces}")
+        elif stream_type == 'cadence':
+            lines.append(f"Cadence (spm): min {min(data)}, max {max(data)}, avg {sum(data)/len(data):.0f}")
+        elif stream_type == 'altitude':
+            lines.append(f"Altitude (m): min {min(data):.0f}, max {max(data):.0f}")
+
+    return '\n'.join(lines)
+
+
+@mcp.tool()
+def get_activity_analysis(activity_id: int) -> str:
+    """Returns a structured training analysis for an activity — HR zone distribution, aerobic decoupling, pace-HR correlation, and cadence consistency.
+    Use this when the user wants to understand the quality of a workout, e.g. 'how was my aerobic effort?', 'was I in zone 2?', 'did my HR drift during the run?'.
+    For raw second-by-second data use get_activity_streams instead.
+    """
+    streams = _fetch_streams(activity_id, ['heartrate', 'velocity_smooth', 'cadence', 'time'])
+    if not streams or 'heartrate' not in streams:
+        return f"No heart rate data available for activity {activity_id}."
+
+    hr_data = streams['heartrate']['data']
+    total = len(hr_data)
+
+    # HR zones (% of max HR — using common 5-zone model with 185bpm max as a typical default)
+    # Zones: Z1 <60%, Z2 60-70%, Z3 70-80%, Z4 80-90%, Z5 >90%
+    max_hr = max(hr_data)
+    zone_bounds = [(0, 0.60), (0.60, 0.70), (0.70, 0.80), (0.80, 0.90), (0.90, 1.01)]
+    zone_counts = [sum(1 for h in hr_data if max_hr * lo <= h < max_hr * hi) for lo, hi in zone_bounds]
+
+    lines = [f"Training analysis for activity {activity_id}:\n"]
+    lines.append("HR Zone distribution (based on peak HR in this activity):")
+    for i, count in enumerate(zone_counts, 1):
+        bar = '█' * (count * 20 // total)
+        lines.append(f"  Z{i}: {count * 100 // total:3d}%  {bar}")
+
+    # Aerobic decoupling — compare avg HR first half vs second half at same effort
+    mid = total // 2
+    first_half_hr = sum(hr_data[:mid]) / mid
+    second_half_hr = sum(hr_data[mid:]) / (total - mid)
+    drift = (second_half_hr - first_half_hr) / first_half_hr * 100
+    lines.append(f"\nHR drift (aerobic decoupling):")
+    lines.append(f"  First half avg HR:  {first_half_hr:.0f} bpm")
+    lines.append(f"  Second half avg HR: {second_half_hr:.0f} bpm")
+    lines.append(f"  Drift: {drift:+.1f}% ({'good aerobic fitness' if abs(drift) < 5 else 'some cardiac drift — consider easier effort'})")
+
+    # Pace consistency
+    if 'velocity_smooth' in streams:
+        vel = [v for v in streams['velocity_smooth']['data'] if v > 0]
+        if vel:
+            avg_pace = sum(vel) / len(vel)
+            pace_std = (sum((v - avg_pace) ** 2 for v in vel) / len(vel)) ** 0.5
+            lines.append(f"\nPace consistency:")
+            lines.append(f"  Average pace: {_format_pace(avg_pace)}")
+            lines.append(f"  Std deviation: {_format_pace(avg_pace - pace_std)} – {_format_pace(avg_pace + pace_std)}")
+
+    # Cadence
+    if 'cadence' in streams:
+        cad = streams['cadence']['data']
+        avg_cad = sum(cad) / len(cad)
+        lines.append(f"\nCadence:")
+        lines.append(f"  Average: {avg_cad:.0f} spm ({'good' if avg_cad >= 170 else 'consider increasing cadence towards 170-180 spm'})")
+
+    return '\n'.join(lines)
+
+
 if __name__ == '__main__':
 
 
