@@ -10,6 +10,19 @@ from mcp.server.fastmcp import FastMCP
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TOKEN_FILE = os.path.join(BASE_DIR, 'strava_token.json')
+CONFIG_FILE = os.path.join(BASE_DIR, 'user_config.json')
+
+
+def load_user_config() -> dict:
+    if not os.path.exists(CONFIG_FILE):
+        return {}
+    with open(CONFIG_FILE) as f:
+        return json.load(f)
+
+
+def save_user_config(config: dict) -> None:
+    with open(CONFIG_FILE, 'w') as f:
+        json.dump(config, f, indent=2)
 
 
 
@@ -304,6 +317,17 @@ def get_activity_streams(activity_id: int, stream_types: str = "heartrate,veloci
 
 
 @mcp.tool()
+def set_max_hr(max_hr: int) -> str:
+    """Saves the athlete's maximum heart rate for use in HR zone calculations. Always call this when the user tells you their max HR. Accurate max HR makes zone analysis significantly more meaningful."""
+    if max_hr < 100 or max_hr > 250:
+        return f"Max HR of {max_hr} bpm looks incorrect — expected a value between 100 and 250."
+    config = load_user_config()
+    config['max_hr'] = max_hr
+    save_user_config(config)
+    return f"Max HR set to {max_hr} bpm. Future HR zone analysis will use this value."
+
+
+@mcp.tool()
 def get_activity_analysis(activity_id: int) -> str:
     """Returns a structured training analysis for an activity — HR zone distribution, aerobic decoupling, pace-HR correlation, and cadence consistency.
     Use this when the user wants to understand the quality of a workout, e.g. 'how was my aerobic effort?', 'was I in zone 2?', 'did my HR drift during the run?'.
@@ -316,17 +340,22 @@ def get_activity_analysis(activity_id: int) -> str:
     hr_data = streams['heartrate']['data']
     total = len(hr_data)
 
-    # HR zones (% of max HR — using common 5-zone model with 185bpm max as a typical default)
-    # Zones: Z1 <60%, Z2 60-70%, Z3 70-80%, Z4 80-90%, Z5 >90%
-    max_hr = max(hr_data)
+    config = load_user_config()
+    if 'max_hr' in config:
+        max_hr = config['max_hr']
+        hr_source = f"configured max HR ({max_hr} bpm)"
+    else:
+        max_hr = max(hr_data)
+        hr_source = f"peak HR in this activity ({max_hr} bpm) — set your actual max HR by telling Claude your max heart rate for more accurate zones"
+
     zone_bounds = [(0, 0.60), (0.60, 0.70), (0.70, 0.80), (0.80, 0.90), (0.90, 1.01)]
     zone_counts = [sum(1 for h in hr_data if max_hr * lo <= h < max_hr * hi) for lo, hi in zone_bounds]
 
     lines = [f"Training analysis for activity {activity_id}:\n"]
-    lines.append("HR Zone distribution (based on peak HR in this activity):")
+    lines.append(f"HR Zone distribution (based on {hr_source}):")
     for i, count in enumerate(zone_counts, 1):
         bar = '█' * (count * 20 // total)
-        lines.append(f"  Z{i}: {count * 100 // total:3d}%  {bar}")
+        lines.append(f"  Z{i} ({int(max_hr * zone_bounds[i-1][0])}-{int(max_hr * zone_bounds[i-1][1])} bpm): {count * 100 // total:3d}%  {bar}")
 
     # Aerobic decoupling — compare avg HR first half vs second half at same effort
     mid = total // 2
