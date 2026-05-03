@@ -96,10 +96,31 @@ def _format_date(date_str: str) -> str:
     return datetime.strptime(date_str, "%Y-%m-%dT%H:%M:%SZ").strftime("%Y-%m-%d %H:%M")
 
 
+def _reverse_geocode(latlng: list) -> str:
+    if not latlng or len(latlng) < 2:
+        return None
+    try:
+        response = requests.get(
+            'https://nominatim.openstreetmap.org/reverse',
+            params={'lat': latlng[0], 'lon': latlng[1], 'format': 'json', 'zoom': 10},
+            headers={'User-Agent': 'strava-mcp-server/1.0'},
+            timeout=5
+        )
+        data = response.json()
+        addr = data.get('address', {})
+        # prefer suburb/village > town/city > county, skip country
+        parts = [addr.get(k) for k in ('suburb', 'village', 'town', 'city', 'county') if addr.get(k)]
+        return ', '.join(parts[:2]) if parts else data.get('display_name', '').split(',')[0]
+    except Exception:
+        return None
+
+
 def _format_activity(a: dict) -> str:
     sport = _sport_category(a.get('type', ''))
+    location = _reverse_geocode(a.get('start_latlng'))
+    location_str = f" — {location}" if location else ""
     lines = [
-        f"  [{a['id']}] {a['name']} ({a.get('type', 'Unknown')}) — {_format_date(a['start_date_local'])}",
+        f"  [{a['id']}] {a['name']} ({a.get('type', 'Unknown')}) — {_format_date(a['start_date_local'])}{location_str}",
         f"  Distance: {a['distance'] / 1000:.2f} km | Time: {format_seconds(a['moving_time'])} | {_format_pace(a.get('average_speed', 0), sport)}",
         f"  Elevation: {a['total_elevation_gain']} m",
     ]
@@ -245,8 +266,10 @@ def get_activity_detail(activity_id: int) -> str:
     a = response.json()
     sport = _sport_category(a.get('type', ''))
 
+    location = _reverse_geocode(a.get('start_latlng'))
     lines = [
         f"{a['name']} ({a.get('type', 'Unknown')}) — {_format_date(a['start_date_local'])}",
+        f"Location: {location}" if location else "Location: unknown",
         f"Distance: {a['distance'] / 1000:.2f} km | Time: {format_seconds(a['moving_time'])} | {_format_pace(a.get('average_speed', 0), sport)}",
         f"Elevation: {a['total_elevation_gain']} m",
     ]
