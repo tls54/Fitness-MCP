@@ -402,6 +402,7 @@ def get_activity_streams(activity_id: int, stream_types: str = "heartrate,veloci
             lines.append(f"Cadence: min {min(data)}, max {max(data)}, avg {sum(data)/len(data):.0f}")
         elif stream_type == 'altitude':
             lines.append(f"Altitude (m): min {min(data):.0f}, max {max(data):.0f}")
+            lines.append(f"  Trace (every 30s): {[round(d, 1) for d in data[::30]]}")
 
     return '\n'.join(lines)
 
