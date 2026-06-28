@@ -1,0 +1,8 @@
+.env
+strava_token.json
+user_config.json
+.vscode/
+__pycache__/
+*.pyc
+.DS_Store
+docs/
