@@ -1,0 +1,5 @@
+garminconnect>=0.2.22
+mcp>=1.0.0
+requests
+python-dotenv
+uvicorn
