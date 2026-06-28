@@ -50,6 +50,60 @@ def safe_call(fn, *args, **kwargs) -> dict:
         return {"ok": False, "error": str(e)}
 
 
+def date_range(start: str, end: str) -> list[str]:
+    s = date.fromisoformat(start)
+    e = date.fromisoformat(end)
+    return [(s + timedelta(days=i)).isoformat() for i in range((e - s).days + 1)]
+
+
+def format_lifestyle_log(logs: list[dict], d: str) -> str:
+    if not logs:
+        return f"No lifestyle log entries for {d}."
+    lines = [f"Lifestyle log for {d}:"]
+    for entry in logs:
+        status = "Completed" if entry.get("logStatus") == "YES" else "Not completed"
+        lines.append(f"- {entry.get('name')}: {status}")
+    return "\n".join(lines)
+
+
+def get_lifestyle_log(client: garminconnect.Garmin, d: str) -> str:
+    data = client.get_lifestyle_logging_data(d)
+    logs = data.get("dailyLogsReport") or []
+    return format_lifestyle_log(logs, d)
+
+
+def get_lifestyle_log_history(client: garminconnect.Garmin, start: str, end: str) -> str:
+    days = date_range(start, end)
+    daily_logs: dict[str, list[dict]] = {}
+    habit_names: list[str] = []
+    for d in days:
+        try:
+            data = client.get_lifestyle_logging_data(d)
+            logs = data.get("dailyLogsReport") or []
+        except Exception:
+            logs = []
+        daily_logs[d] = logs
+        for entry in logs:
+            if entry.get("name") not in habit_names:
+                habit_names.append(entry.get("name"))
+
+    if not habit_names:
+        return f"No lifestyle log entries found between {start} and {end}."
+
+    header = "Date       | " + " | ".join(habit_names)
+    lines = [header, "-" * len(header)]
+    for d in days:
+        status_by_name = {e.get("name"): e.get("logStatus") == "YES" for e in daily_logs[d]}
+        row = [d]
+        for h in habit_names:
+            if h not in status_by_name:
+                row.append("not logged")
+            else:
+                row.append("done" if status_by_name[h] else "missed")
+        lines.append(" | ".join(row))
+    return "\n".join(lines)
+
+
 # ── Tools ─────────────────────────────────────────────────────────────────────
 
 TOOLS = [
@@ -252,6 +306,21 @@ TOOLS = [
         inputSchema={"type": "object", "properties": {"end_date": {"type": "string", "description": "YYYY-MM-DD. Defaults to today."}}},
     ),
 
+    # ── Lifestyle / habits ────────────────────────────────────────────────────
+    types.Tool(
+        name="get_lifestyle_log",
+        description="Get the lifestyle/habit log for a date: which manually-tracked habits (e.g. healthy meals, morning caffeine, moderate exercise, ankle exercises) were logged that day and whether each was completed.",
+        inputSchema={"type": "object", "properties": {"date": {"type": "string", "description": "YYYY-MM-DD. Defaults to today."}}},
+    ),
+    types.Tool(
+        name="get_lifestyle_log_history",
+        description="Get lifestyle/habit log compliance across a date range, as a day-by-day table showing whether each tracked habit was done, missed, or not logged.",
+        inputSchema={"type": "object", "properties": {
+            "start_date": {"type": "string", "description": "YYYY-MM-DD. Required."},
+            "end_date": {"type": "string", "description": "YYYY-MM-DD. Defaults to today."},
+        }, "required": ["start_date"]},
+    ),
+
     # ── Body & weight ─────────────────────────────────────────────────────────
     types.Tool(
         name="get_weight",
@@ -410,6 +479,15 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextCont
     elif name == "get_weekly_summary":
         end = arguments.get("end_date", today_str())
         result = safe_call(client.get_weekly_stress, end)
+
+    # ── Lifestyle / habits ────────────────────────────────────────────────────
+    elif name == "get_lifestyle_log":
+        result = safe_call(get_lifestyle_log, client, d)
+
+    elif name == "get_lifestyle_log_history":
+        start = arguments["start_date"]
+        end = arguments.get("end_date", today_str())
+        result = safe_call(get_lifestyle_log_history, client, start, end)
 
     # ── Body & weight ─────────────────────────────────────────────────────────
     elif name == "get_weight":

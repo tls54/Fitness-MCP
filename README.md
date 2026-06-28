@@ -4,7 +4,7 @@ A local stdio MCP server that gives Claude direct access to your Garmin Connect 
 
 ---
 
-## Tools (32)
+## Tools (34)
 
 ### Daily Health
 
@@ -62,6 +62,13 @@ A local stdio MCP server that gives Claude direct access to your Garmin Connect 
 | Tool | Data |
 |------|------|
 | `get_weight` | Weight and body composition over a date range |
+
+### Lifestyle
+
+| Tool | Data |
+|------|------|
+| `get_lifestyle_log` | Daily habit log (e.g. healthy meals, morning caffeine, exercise) and completion status |
+| `get_lifestyle_log_history` | Day-by-day habit compliance table over a date range |
 
 ---
 
