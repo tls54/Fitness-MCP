@@ -46,12 +46,57 @@ _STEP_KIND_TO_TYPE_ID = {
 }
 
 
+def _build_step_target(step: dict) -> dict:
+    """Build the targetType (+ target value fields) for a step from optional pace/HR keys.
+
+    Supported keys (at most one group):
+      - pace_min_per_km / pace_max_per_km: seconds-per-km bounds (slower/faster) -> speed zone target.
+      - hr_zone: int 1-5 -> heart rate zone target.
+      - hr_min / hr_max: bpm bounds -> heart rate target.
+    """
+    pace_min = step.get("pace_min_per_km")
+    pace_max = step.get("pace_max_per_km")
+    hr_zone = step.get("hr_zone")
+    hr_min = step.get("hr_min")
+    hr_max = step.get("hr_max")
+
+    if pace_min is not None or pace_max is not None:
+        if pace_min is None or pace_max is None:
+            raise ValueError("pace_min_per_km and pace_max_per_km must be set together")
+        # pace_min_per_km is the faster (smaller sec/km) bound, pace_max_per_km the slower one.
+        # Garmin targets are in speed (m/s), where higher = faster, so they invert vs. pace:
+        # targetValueOne = min speed (from the slower pace bound), targetValueTwo = max speed (from the faster one).
+        return {
+            "targetType": {"workoutTargetTypeId": 5, "workoutTargetTypeKey": "speed.zone", "displayOrder": 5},
+            "targetValueOne": 1000.0 / float(pace_max),
+            "targetValueTwo": 1000.0 / float(pace_min),
+        }
+
+    if hr_zone is not None:
+        return {
+            "targetType": {"workoutTargetTypeId": 4, "workoutTargetTypeKey": "heart.rate.zone", "displayOrder": 4},
+            "zoneNumber": int(hr_zone),
+        }
+
+    if hr_min is not None or hr_max is not None:
+        if hr_min is None or hr_max is None:
+            raise ValueError("hr_min and hr_max must be set together")
+        return {
+            "targetType": {"workoutTargetTypeId": 4, "workoutTargetTypeKey": "heart.rate.zone", "displayOrder": 4},
+            "targetValueOne": float(hr_min),
+            "targetValueTwo": float(hr_max),
+        }
+
+    return {"targetType": {"workoutTargetTypeId": 1, "workoutTargetTypeKey": "no.target", "displayOrder": 1}}
+
+
 def _build_workout_step(step: dict, order: list[int]) -> "object":
     """Recursively build an ExecutableStep or RepeatGroup from a plain-dict step spec.
 
     step kinds: "warmup", "interval", "recovery", "cooldown", "rest" (each takes
-    "distance_km" or "seconds" as the end condition, exactly one of the two),
-    or "repeat" (takes "repeat_count" and a nested "steps" list).
+    "distance_km" or "seconds" as the end condition, exactly one of the two, plus
+    optional pace/HR target keys - see _build_step_target), or "repeat" (takes
+    "repeat_count" and a nested "steps" list).
     """
     from garminconnect.workout import ExecutableStep, RepeatGroup
 
@@ -91,12 +136,13 @@ def _build_workout_step(step: dict, order: list[int]) -> "object":
         end_condition_value = float(seconds)
 
     type_id = _STEP_KIND_TO_TYPE_ID[kind]
+    target = _build_step_target(step)
     return ExecutableStep(
         stepOrder=this_order,
         stepType={"stepTypeId": type_id, "stepTypeKey": kind, "displayOrder": type_id},
         endCondition=end_condition,
         endConditionValue=end_condition_value,
-        targetType={"workoutTargetTypeId": 1, "workoutTargetTypeKey": "no.target", "displayOrder": 1},
+        **target,
     )
 
 
@@ -387,22 +433,32 @@ def register(mcp: FastMCP) -> None:
         """Create a structured running workout in Garmin Connect and return its workout_id. Does NOT schedule it on a date - call garmin_schedule_workout afterwards to put it on the calendar so it syncs to the watch.
 
         steps: an ordered list of step dicts, each one of:
-          - {"kind": "warmup"|"cooldown"|"interval"|"recovery"|"rest", "distance_km": float} - a step ending after a distance
-          - {"kind": "warmup"|"cooldown"|"interval"|"recovery"|"rest", "seconds": float} - a step ending after a duration
+          - {"kind": "warmup"|"cooldown"|"interval"|"recovery"|"rest", "distance_km": float, ...} - a step ending after a distance
+          - {"kind": "warmup"|"cooldown"|"interval"|"recovery"|"rest", "seconds": float, ...} - a step ending after a duration
           - {"kind": "repeat", "repeat_count": int, "steps": [...]} - repeats a nested list of steps N times
 
-        Example for "4km, then 6x(20s stride + 60s recovery), then 1km":
+        Any non-repeat step can also carry an on-watch pace or heart-rate target (shown live
+        during the step, alongside its distance/time countdown) via one of:
+          - "pace_min_per_km" + "pace_max_per_km": seconds-per-km bounds, e.g. 330 (5:30) to 360 (6:00)
+          - "hr_zone": int 1-5, referencing the athlete's predefined Garmin HR zones
+          - "hr_min" + "hr_max": explicit bpm bounds
+        Omit all of these for an unconstrained "just run/rest" step.
+
+        Example for "4km easy, then 6x(20s stride + 60s easy jog recovery), then 1km easy cooldown",
+        assuming the athlete's easy pace is roughly 5:30-6:00/km:
         [
-          {"kind": "interval", "distance_km": 4},
+          {"kind": "warmup", "distance_km": 4, "pace_min_per_km": 330, "pace_max_per_km": 360},
           {"kind": "repeat", "repeat_count": 6, "steps": [
             {"kind": "interval", "seconds": 20},
-            {"kind": "recovery", "seconds": 60}
+            {"kind": "recovery", "seconds": 60, "pace_min_per_km": 330, "pace_max_per_km": 360}
           ]},
-          {"kind": "interval", "distance_km": 1}
+          {"kind": "cooldown", "distance_km": 1, "pace_min_per_km": 330, "pace_max_per_km": 360}
         ]
+        Strides themselves are intentionally left with no pace target (effort naturally builds to
+        near-max over the 20s) - only the easy running/recovery sections should carry the easy-pace target.
 
-        pace_sec_per_km: rough pace estimate (seconds per km) used only to compute the
-        workout's estimated duration metadata; defaults to 6:00/km. Does not affect pacing.
+        pace_sec_per_km: rough overall pace estimate (seconds per km) used only to compute the
+        workout's estimated duration metadata; defaults to 6:00/km. Does not affect on-watch targets.
         """
         from garminconnect.workout import RunningWorkout
 
