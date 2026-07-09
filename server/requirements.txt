@@ -1,5 +1,6 @@
-garminconnect>=0.2.22
+garminconnect>=0.3.2
 mcp>=1.0.0
 requests
 python-dotenv
 uvicorn
+pydantic

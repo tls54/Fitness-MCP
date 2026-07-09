@@ -37,6 +37,79 @@ def safe_call(fn, *args, **kwargs) -> dict:
         return {"ok": False, "error": str(e)}
 
 
+_STEP_KIND_TO_TYPE_ID = {
+    "warmup": 1,
+    "cooldown": 2,
+    "interval": 3,
+    "recovery": 4,
+    "rest": 5,
+}
+
+
+def _build_workout_step(step: dict, order: list[int]) -> "object":
+    """Recursively build an ExecutableStep or RepeatGroup from a plain-dict step spec.
+
+    step kinds: "warmup", "interval", "recovery", "cooldown", "rest" (each takes
+    "distance_km" or "seconds" as the end condition, exactly one of the two),
+    or "repeat" (takes "repeat_count" and a nested "steps" list).
+    """
+    from garminconnect.workout import ExecutableStep, RepeatGroup
+
+    kind = step["kind"]
+    order[0] += 1
+    this_order = order[0]
+
+    if kind == "repeat":
+        child_steps = [_build_workout_step(s, order) for s in step["steps"]]
+        return RepeatGroup(
+            stepOrder=this_order,
+            stepType={"stepTypeId": 6, "stepTypeKey": "repeat", "displayOrder": 6},
+            numberOfIterations=step["repeat_count"],
+            workoutSteps=child_steps,
+            endCondition={
+                "conditionTypeId": 7,
+                "conditionTypeKey": "iterations",
+                "displayOrder": 7,
+                "displayable": False,
+            },
+            endConditionValue=float(step["repeat_count"]),
+        )
+
+    if kind not in _STEP_KIND_TO_TYPE_ID:
+        raise ValueError(f"Unknown step kind: {kind!r}")
+
+    distance_km = step.get("distance_km")
+    seconds = step.get("seconds")
+    if (distance_km is None) == (seconds is None):
+        raise ValueError(f"Step {step!r} must set exactly one of distance_km or seconds")
+
+    if distance_km is not None:
+        end_condition = {"conditionTypeId": 1, "conditionTypeKey": "distance", "displayOrder": 2, "displayable": True}
+        end_condition_value = float(distance_km) * 1000.0
+    else:
+        end_condition = {"conditionTypeId": 2, "conditionTypeKey": "time", "displayOrder": 2, "displayable": True}
+        end_condition_value = float(seconds)
+
+    type_id = _STEP_KIND_TO_TYPE_ID[kind]
+    return ExecutableStep(
+        stepOrder=this_order,
+        stepType={"stepTypeId": type_id, "stepTypeKey": kind, "displayOrder": type_id},
+        endCondition=end_condition,
+        endConditionValue=end_condition_value,
+        targetType={"workoutTargetTypeId": 1, "workoutTargetTypeKey": "no.target", "displayOrder": 1},
+    )
+
+
+def _estimate_step_duration_seconds(step: dict, pace_sec_per_km: float) -> float:
+    if step["kind"] == "repeat":
+        return step["repeat_count"] * sum(
+            _estimate_step_duration_seconds(s, pace_sec_per_km) for s in step["steps"]
+        )
+    if step.get("seconds") is not None:
+        return float(step["seconds"])
+    return float(step["distance_km"]) * pace_sec_per_km
+
+
 def date_range(start: str, end: str) -> list[str]:
     s = date.fromisoformat(start)
     e = date.fromisoformat(end)
@@ -307,3 +380,63 @@ def register(mcp: FastMCP) -> None:
         start = start_date or days_ago(14)
         end = end_date or today_str()
         return safe_call(get_client().get_body_composition, start, end)
+
+    # ── Workouts (write) ─────────────────────────────────────────────────────
+    @mcp.tool(name="garmin_create_running_workout")
+    def create_running_workout(name: str, steps: list[dict], pace_sec_per_km: float = 360.0) -> dict:
+        """Create a structured running workout in Garmin Connect and return its workout_id. Does NOT schedule it on a date - call garmin_schedule_workout afterwards to put it on the calendar so it syncs to the watch.
+
+        steps: an ordered list of step dicts, each one of:
+          - {"kind": "warmup"|"cooldown"|"interval"|"recovery"|"rest", "distance_km": float} - a step ending after a distance
+          - {"kind": "warmup"|"cooldown"|"interval"|"recovery"|"rest", "seconds": float} - a step ending after a duration
+          - {"kind": "repeat", "repeat_count": int, "steps": [...]} - repeats a nested list of steps N times
+
+        Example for "4km, then 6x(20s stride + 60s recovery), then 1km":
+        [
+          {"kind": "interval", "distance_km": 4},
+          {"kind": "repeat", "repeat_count": 6, "steps": [
+            {"kind": "interval", "seconds": 20},
+            {"kind": "recovery", "seconds": 60}
+          ]},
+          {"kind": "interval", "distance_km": 1}
+        ]
+
+        pace_sec_per_km: rough pace estimate (seconds per km) used only to compute the
+        workout's estimated duration metadata; defaults to 6:00/km. Does not affect pacing.
+        """
+        from garminconnect.workout import RunningWorkout
+
+        order = [0]
+        workout_steps = [_build_workout_step(s, order) for s in steps]
+        segment = {
+            "segmentOrder": 1,
+            "sportType": {"sportTypeId": 1, "sportTypeKey": "running", "displayOrder": 1},
+            "workoutSteps": workout_steps,
+        }
+        estimated_duration = int(
+            sum(_estimate_step_duration_seconds(s, pace_sec_per_km) for s in steps)
+        )
+        workout = RunningWorkout(
+            workoutName=name,
+            estimatedDurationInSecs=estimated_duration,
+            workoutSegments=[segment],
+        )
+        result = safe_call(get_client().upload_running_workout, workout)
+        if result["ok"] and isinstance(result["data"], dict):
+            result["data"]["workout_id"] = result["data"].get("workoutId")
+        return result
+
+    @mcp.tool(name="garmin_schedule_workout")
+    def schedule_workout(workout_id: str, date: str) -> dict:
+        """Schedule a previously-created Garmin workout onto a specific calendar date so it syncs to the watch. workout_id: from garmin_create_running_workout. date: YYYY-MM-DD."""
+        return safe_call(get_client().schedule_workout, workout_id, date)
+
+    @mcp.tool(name="garmin_list_workouts")
+    def list_workouts(limit: int = 20) -> dict:
+        """List workouts stored in Garmin Connect (most recently created first). limit: max results (default 20)."""
+        return safe_call(get_client().get_workouts, 0, limit)
+
+    @mcp.tool(name="garmin_delete_workout")
+    def delete_workout(workout_id: str) -> dict:
+        """Delete a workout from Garmin Connect by its workout_id."""
+        return safe_call(get_client().delete_workout, workout_id)
