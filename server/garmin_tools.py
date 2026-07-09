@@ -129,7 +129,9 @@ def _build_workout_step(step: dict, order: list[int]) -> "object":
         raise ValueError(f"Step {step!r} must set exactly one of distance_km or seconds")
 
     if distance_km is not None:
-        end_condition = {"conditionTypeId": 1, "conditionTypeKey": "distance", "displayOrder": 2, "displayable": True}
+        # Garmin's own schema uses conditionTypeId 3 for distance; 1 is "lap.button" (confirmed
+        # empirically - Garmin's upload response echoed conditionTypeId=1 back as "lap.button").
+        end_condition = {"conditionTypeId": 3, "conditionTypeKey": "distance", "displayOrder": 2, "displayable": True}
         end_condition_value = float(distance_km) * 1000.0
     else:
         end_condition = {"conditionTypeId": 2, "conditionTypeKey": "time", "displayOrder": 2, "displayable": True}
