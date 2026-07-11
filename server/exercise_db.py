@@ -1,9 +1,60 @@
-"""Lookup functions against exercises.db (built by build_exercise_db.py)."""
+"""Lookup functions against exercises.db (built by build_exercise_db.py), plus a small
+store of operator-confirmed exercise_name -> (category, exerciseName) enum overrides.
 
+exercises.db itself is a static, deterministic build artifact committed to git and baked
+into the Docker image - fine to ship in the image, but that also means anything written to
+it at runtime would vanish on the next deploy. Confirmed enum overrides are genuinely
+dynamic (the result of live testing against a real Garmin account), so they're kept
+separately in a small JSON file on the same persistent volume already used for
+GARMIN_TOKEN_DIR/OAUTH_STORE_PATH - set EXERCISE_ENUM_OVERRIDES_PATH to a path on that
+volume (e.g. /data/exercise_enum_overrides.json) in production so recordings survive
+redeploys; it defaults to a local file next to this script for local dev.
+"""
+
+import json
 import os
 import sqlite3
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "exercises.db")
+OVERRIDES_PATH = os.environ.get(
+    "EXERCISE_ENUM_OVERRIDES_PATH", os.path.join(os.path.dirname(__file__), "confirmed_exercise_enums.json")
+)
+
+
+def _load_overrides() -> dict:
+    if os.path.exists(OVERRIDES_PATH):
+        with open(OVERRIDES_PATH) as f:
+            return json.load(f)
+    return {}
+
+
+def _override_key(name: str, category: str | None) -> str:
+    return f"{name.strip().lower()}|{(category or '').strip().lower()}"
+
+
+def save_confirmed_enum(exercise_name: str, garmin_category_enum: str, garmin_name_enum: str, category: str | None = None) -> dict:
+    """Record an operator-confirmed (exercise_name [+ category] -> category/exerciseName enum)
+    mapping, persisted to OVERRIDES_PATH. Takes priority over exercises.db in get_garmin_enums.
+    """
+    overrides = _load_overrides()
+    entry = {
+        "exercise_name": exercise_name,
+        "category": category,
+        "garmin_category_enum": garmin_category_enum,
+        "garmin_name_enum": garmin_name_enum,
+        "enum_confidence": "confirmed",
+    }
+    overrides[_override_key(exercise_name, category)] = entry
+
+    os.makedirs(os.path.dirname(OVERRIDES_PATH) or ".", exist_ok=True)
+    with open(OVERRIDES_PATH, "w") as f:
+        json.dump(overrides, f, indent=2)
+    return entry
+
+
+def list_confirmed_enums() -> list[dict]:
+    """All operator-confirmed overrides recorded so far."""
+    return list(_load_overrides().values())
 
 
 def _connect() -> sqlite3.Connection:
@@ -106,7 +157,15 @@ def get_garmin_enums(name: str, category: str | None = None) -> dict | None:
     """Best single match for an exercise name (optionally narrowed by category), with its
     enum_confidence ('confirmed' | 'guessed' | 'todo') and category/name enum values
     (name enum may be None if confidence is 'todo').
+
+    Checks operator-confirmed overrides (see save_confirmed_enum) first - these always win
+    over exercises.db, since they're the result of an actual live-tested upload.
     """
+    overrides = _load_overrides()
+    override = overrides.get(_override_key(name, category)) or overrides.get(_override_key(name, None))
+    if override:
+        return override
+
     conn = _connect()
     try:
         if category:

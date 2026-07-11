@@ -705,3 +705,38 @@ def register(mcp: FastMCP) -> None:
     def delete_workout(workout_id: str) -> dict:
         """Delete a workout from Garmin Connect by its workout_id."""
         return safe_call(get_client().delete_workout, workout_id)
+
+    @mcp.tool(name="garmin_get_workout_by_id")
+    def get_workout_by_id(workout_id: str) -> dict:
+        """Fetch a workout's full raw structure exactly as Garmin stored it, including each step's real endCondition/category/exerciseName. Use this to discover the correct Garmin enums for an exercise: build the workout using Garmin Connect's own exercise picker (app or web - guaranteed valid, unlike our free-text lookup), find its workout_id with garmin_list_workouts, fetch it here, read off the category/exerciseName Garmin actually assigned to each step, then call garmin_record_exercise_enum to save that mapping for future use. workout_id: from garmin_list_workouts or the result of garmin_create_strength_workout/garmin_create_running_workout."""
+        return safe_call(get_client().get_workout_by_id, workout_id)
+
+    @mcp.tool(name="garmin_record_exercise_enum")
+    def record_exercise_enum(
+        exercise_name: str, garmin_category_enum: str, garmin_name_enum: str, category: str = ""
+    ) -> dict:
+        """Record a confirmed Garmin category/exerciseName enum mapping for a free-text exercise name, so future garmin_create_strength_workout calls use the real enum instead of the free-text Notes fallback.
+
+        Use this after reading back a workout with garmin_get_workout_by_id: if a step you
+        built via Garmin's own exercise picker shows e.g. category="FLYE", exerciseName="CABLE_CROSSOVER"
+        for what you think of as "cable fly", call:
+          garmin_record_exercise_enum(exercise_name="cable fly", garmin_category_enum="FLYE", garmin_name_enum="CABLE_CROSSOVER")
+
+        exercise_name: the free-text name you'll use in garmin_create_strength_workout going forward.
+        category: optional - only needed if exercise_name is ambiguous across multiple Garmin
+                  categories (matches the "category" field you'd pass to garmin_create_strength_workout).
+        This persists to a small store separate from the bundled exercise database, so it
+        survives redeploys without needing exercises.db itself to be rebuilt.
+        """
+        import exercise_db
+
+        return safe_call(
+            exercise_db.save_confirmed_enum, exercise_name, garmin_category_enum, garmin_name_enum, category or None
+        )
+
+    @mcp.tool(name="garmin_list_confirmed_exercise_enums")
+    def list_confirmed_exercise_enums() -> dict:
+        """List all operator-confirmed exercise_name -> Garmin enum mappings recorded so far via garmin_record_exercise_enum."""
+        import exercise_db
+
+        return safe_call(exercise_db.list_confirmed_enums)
