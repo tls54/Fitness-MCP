@@ -28,6 +28,12 @@ import urllib.request
 SOURCE_URL = "https://raw.githubusercontent.com/mrnabilnoh/workout-plan-garmin-connect/main/garmin_connect_exercise_list.md"
 DB_PATH = "exercises.db"
 
+# (garmin_category_enum, garmin_name_enum) pairs read back from a workout Theo built using
+# Garmin Connect's own exercise picker (via garmin_get_workout_by_id) - these are real,
+# device-confirmed enum values, not guesses. Applied as a post-build confirmation pass so
+# rebuilding exercises.db from the source markdown doesn't silently lose them.
+CONFIRMED_SEED_PATH = "confirmed_exercises_seed.json"
+
 MUSCLE_EMOJI_LEGEND = {
     "🦵": ["QUADS", "HAMSTRINGS", "ADDUCTORS", "ABDUCTORS", "HIPS"],
     "🍑": ["GLUTES"],
@@ -92,7 +98,13 @@ def parse_muscle_cell(cell: str) -> list[str]:
 
 def to_enum_case(text: str) -> str:
     text = re.sub(r"[^A-Za-z0-9]+", "_", text.strip())
-    return text.strip("_").upper()
+    text = text.strip("_").upper()
+    # Garmin prefixes enum identifiers that would otherwise start with a digit with an
+    # underscore (e.g. "3 Way Calf Raise" -> "_3_WAY_CALF_RAISE") - confirmed by reading
+    # back a workout built via Garmin Connect's own exercise picker.
+    if text and text[0].isdigit():
+        text = "_" + text
+    return text
 
 
 def fetch_markdown() -> str:
@@ -133,6 +145,45 @@ def parse_table(markdown: str) -> list[dict]:
             }
         )
     return rows
+
+
+def apply_confirmed_seed(conn: sqlite3.Connection) -> None:
+    """Apply CONFIRMED_SEED_PATH's (category_enum, name_enum) pairs on top of the freshly
+    built table, matching each pair back to a row by recomputing its own name/category enum
+    and comparing. A blank name_enum in the seed means "generic category, no specific
+    exercise" - matched to the self-referential row (name == category) if one exists.
+    """
+    import os
+
+    if not os.path.exists(CONFIRMED_SEED_PATH):
+        return
+
+    with open(CONFIRMED_SEED_PATH) as f:
+        pairs = json.load(f)
+
+    rows = conn.execute("SELECT id, name, category, garmin_category_enum FROM exercises").fetchall()
+    by_category: dict[str, list] = {}
+    for r in rows:
+        by_category.setdefault(r[3], []).append(r)
+
+    matched, unmatched = 0, []
+    for category_enum, name_enum in pairs:
+        candidates = by_category.get(category_enum, [])
+        target = category_enum if name_enum == "" else name_enum
+        hit = next((r for r in candidates if to_enum_case(r[1]) == target), None)
+        if hit:
+            conn.execute(
+                "UPDATE exercises SET garmin_category_enum=?, garmin_name_enum=?, enum_confidence='confirmed' WHERE id=?",
+                (category_enum, name_enum or category_enum, hit[0]),
+            )
+            matched += 1
+        else:
+            unmatched.append((category_enum, name_enum))
+    conn.commit()
+
+    print(f"Applied confirmed seed: {matched}/{len(pairs)} matched")
+    for u in unmatched:
+        print(f"  unmatched (generic category, no catalog row to attach to): {u}")
 
 
 def build_db(rows: list[dict]) -> None:
@@ -191,6 +242,7 @@ def build_db(rows: list[dict]) -> None:
 
     conn.execute("INSERT INTO exercises_fts (rowid, name) SELECT id, name FROM exercises")
     conn.commit()
+    apply_confirmed_seed(conn)
 
     total = conn.execute("SELECT COUNT(*) FROM exercises").fetchone()[0]
     by_confidence = conn.execute(

@@ -148,11 +148,14 @@ def _build_workout_step(step: dict, order: list[int]) -> "object":
     )
 
 
-# Confirmed live via probe_strength_roundtrip.py: id 9 round-trips correctly and is
-# accepted by Garmin's backend as a genuine reps end-condition, even though Garmin's
-# own conditionTypeKey for it is "fixed.repetition", not "reps" (label only - the id
-# is what Garmin actually keys off, and it's confirmed to work end to end).
-_STRENGTH_REPS_CONDITION_TYPE_ID = 9
+# CORRECTED: id 9 ("fixed.repetition") is NOT the real reps condition - it round-tripped
+# fine through the upload API (accepted, echoed back unchanged), which is why it was
+# originally marked "confirmed", but the API accepting/echoing a value only proves the
+# API stores what you send - it doesn't prove the watch/app renders it as a rep target.
+# id 9 steps showed no target at all in Garmin Connect's app. The real value, confirmed
+# by inspecting a workout built via Garmin's own exercise picker (garmin_get_workout_by_id),
+# is id 10, conditionTypeKey "reps".
+_STRENGTH_REPS_CONDITION_TYPE_ID = 10
 
 
 def _build_strength_round(exercise: dict, order: list[int], fallbacks: list[dict]) -> "object":
@@ -192,7 +195,7 @@ def _build_strength_round(exercise: dict, order: list[int], fallbacks: list[dict
     if reps is not None:
         end_condition = {
             "conditionTypeId": _STRENGTH_REPS_CONDITION_TYPE_ID,
-            "conditionTypeKey": "fixed.repetition",
+            "conditionTypeKey": "reps",
             "displayOrder": 2,
             "displayable": True,
         }
