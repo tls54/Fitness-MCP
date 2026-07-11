@@ -148,6 +148,116 @@ def _build_workout_step(step: dict, order: list[int]) -> "object":
     )
 
 
+# Confirmed live via probe_strength_roundtrip.py: id 9 round-trips correctly and is
+# accepted by Garmin's backend as a genuine reps end-condition, even though Garmin's
+# own conditionTypeKey for it is "fixed.repetition", not "reps" (label only - the id
+# is what Garmin actually keys off, and it's confirmed to work end to end).
+_STRENGTH_REPS_CONDITION_TYPE_ID = 9
+
+
+def _build_strength_round(exercise: dict, order: list[int], fallbacks: list[dict]) -> "object":
+    """Build a RepeatGroup of (exercise step, rest step) x sets for one strength exercise.
+
+    exercise: {"exercise_name": str, "category": str (optional, disambiguates when the
+               same name exists in multiple Garmin categories), "sets": int,
+               "rest_seconds": float, and exactly one of "reps": int or "seconds": float}
+
+    Looks up exercise_name (+ optional category) in exercises.db (see exercise_db.py).
+    If no match is found, or the match's enum_confidence is 'todo' (no trustworthy
+    category/exerciseName enum), falls back to a generic "Total Body" category step
+    with the intended exercise name and target written into the step's free-text
+    "description" field - the watch will show that text but won't auto-count reps for
+    it, so the athlete has to manually advance with the lap button on that step. Any
+    such fallback is appended to `fallbacks` so the caller can surface it clearly.
+    """
+    from garminconnect.workout import ExecutableStep, RepeatGroup
+
+    import exercise_db
+
+    name = exercise["exercise_name"]
+    category_hint = exercise.get("category")
+    match = exercise_db.get_garmin_enums(name, category_hint)
+
+    reps = exercise.get("reps")
+    seconds = exercise.get("seconds")
+    if (reps is None) == (seconds is None):
+        raise ValueError(f"Exercise {exercise!r} must set exactly one of reps or seconds")
+
+    sets = exercise["sets"]
+    rest_seconds = exercise["rest_seconds"]
+    target_desc = f"{reps} reps" if reps is not None else f"{seconds}s"
+
+    order[0] += 1
+    exercise_step_order = order[0]
+    if reps is not None:
+        end_condition = {
+            "conditionTypeId": _STRENGTH_REPS_CONDITION_TYPE_ID,
+            "conditionTypeKey": "fixed.repetition",
+            "displayOrder": 2,
+            "displayable": True,
+        }
+        end_condition_value = float(reps)
+    else:
+        end_condition = {"conditionTypeId": 2, "conditionTypeKey": "time", "displayOrder": 2, "displayable": True}
+        end_condition_value = float(seconds)
+
+    if match is not None and match["enum_confidence"] != "todo":
+        exercise_step = ExecutableStep(
+            stepOrder=exercise_step_order,
+            stepType={"stepTypeId": 3, "stepTypeKey": "interval", "displayOrder": 3},
+            endCondition=end_condition,
+            endConditionValue=end_condition_value,
+            targetType={"workoutTargetTypeId": 1, "workoutTargetTypeKey": "no.target", "displayOrder": 1},
+            category=match["garmin_category_enum"],
+            exerciseName=match["garmin_name_enum"],
+        )
+    else:
+        fallbacks.append(
+            {
+                "exercise_name": name,
+                "reason": "no confident enum match in exercises.db"
+                if match is None
+                else f"only a {match['enum_confidence']} match (category={match['category']!r})",
+                "note": "watch will display the name/target as text but won't auto-count reps; "
+                "advance this step manually with the lap button",
+            }
+        )
+        exercise_step = ExecutableStep(
+            stepOrder=exercise_step_order,
+            stepType={"stepTypeId": 3, "stepTypeKey": "interval", "displayOrder": 3},
+            endCondition=end_condition,
+            endConditionValue=end_condition_value,
+            targetType={"workoutTargetTypeId": 1, "workoutTargetTypeKey": "no.target", "displayOrder": 1},
+            description=f"{name} - {target_desc}",
+        )
+
+    order[0] += 1
+    rest_step_order = order[0]
+    rest_step = ExecutableStep(
+        stepOrder=rest_step_order,
+        stepType={"stepTypeId": 5, "stepTypeKey": "rest", "displayOrder": 5},
+        endCondition={"conditionTypeId": 2, "conditionTypeKey": "time", "displayOrder": 2, "displayable": True},
+        endConditionValue=float(rest_seconds),
+        targetType={"workoutTargetTypeId": 1, "workoutTargetTypeKey": "no.target", "displayOrder": 1},
+    )
+
+    order[0] += 1
+    round_order = order[0]
+    return RepeatGroup(
+        stepOrder=round_order,
+        stepType={"stepTypeId": 6, "stepTypeKey": "repeat", "displayOrder": 6},
+        numberOfIterations=sets,
+        workoutSteps=[exercise_step, rest_step],
+        endCondition={"conditionTypeId": 7, "conditionTypeKey": "iterations", "displayOrder": 7, "displayable": False},
+        endConditionValue=float(sets),
+    )
+
+
+def _estimate_strength_duration_seconds(exercise: dict) -> float:
+    work_seconds = exercise["seconds"] if exercise.get("seconds") is not None else exercise.get("reps", 0) * 3.0
+    return exercise["sets"] * (work_seconds + exercise["rest_seconds"])
+
+
 def _estimate_step_duration_seconds(step: dict, pace_sec_per_km: float) -> float:
     if step["kind"] == "repeat":
         return step["repeat_count"] * sum(
@@ -483,6 +593,103 @@ def register(mcp: FastMCP) -> None:
         if result["ok"] and isinstance(result["data"], dict):
             result["data"]["workout_id"] = result["data"].get("workoutId")
         return result
+
+    @mcp.tool(name="garmin_create_strength_workout")
+    def create_strength_workout(name: str, exercises: list[dict]) -> dict:
+        """Create a structured strength workout in Garmin Connect and return its workout_id. Does NOT schedule it - call garmin_schedule_workout afterwards to put it on the calendar so it syncs to the watch.
+
+        exercise_name is looked up against exercises.db, a ~1500-exercise database built from
+        Garmin's own exercise catalog (see build_exercise_db.py/exercise_db.py). Use
+        garmin_find_exercise first to check what a name resolves to and its confidence
+        ('confirmed': round-trip tested against a live Garmin upload; 'guessed': same naming
+        pattern as a confirmed exercise but not tested; 'todo': no trustworthy Garmin enum
+        found). If a name has no confident match (or isn't found at all), this tool
+        automatically falls back to a generic step with the exercise name and target written
+        as free text (returned in the response's "fallbacks" list) - the watch will show that
+        text but can't auto-count reps for it, so the athlete advances that step manually with
+        the lap button. This never raises for an unmatched name; check the response's
+        "fallbacks" list to see which steps, if any, need manual lap-button advancing.
+
+        exercises: an ordered list of exercise dicts, each:
+          {"exercise_name": str (free text, e.g. "cable fly", "goblet squat"),
+           "category": str (optional - disambiguates when the same name exists in multiple
+                       Garmin categories, e.g. "Squat" vs "Banded Exercises"),
+           "sets": int,
+           "rest_seconds": float,
+           "reps": int}   # OR "seconds": float instead of "reps", for timed holds like planks
+
+        Each exercise becomes one repeating round of (exercise, rest) x sets - e.g. sets=3,
+        reps=12, rest_seconds=60 becomes 3 rounds of "12 reps" then "rest 60s".
+
+        Known limitation: a single exercise entry uses the same reps/seconds for every set.
+        Varying reps or weight across sets of the same exercise (e.g. 12/10/8) is not supported -
+        this will raise an error rather than silently build something wrong. If you need that,
+        list the exercise multiple times with sets=1 each instead, though it won't render as
+        cleanly on the watch as a proper repeat round.
+
+        Example for "3 sets of 12 squats, 60s rest; 3 sets of 30s plank, 45s rest":
+        [
+          {"exercise_name": "squat", "sets": 3, "reps": 12, "rest_seconds": 60},
+          {"exercise_name": "plank", "sets": 3, "seconds": 30, "rest_seconds": 45}
+        ]
+        """
+        from garminconnect.workout import FitnessEquipmentWorkout
+
+        for exercise in exercises:
+            if "sets" not in exercise or "rest_seconds" not in exercise:
+                raise ValueError(f"Exercise {exercise!r} must set 'sets' and 'rest_seconds'")
+
+        order = [0]
+        fallbacks: list[dict] = []
+        workout_steps = [_build_strength_round(e, order, fallbacks) for e in exercises]
+        segment = {
+            "segmentOrder": 1,
+            "sportType": {"sportTypeId": 6, "sportTypeKey": "fitness_equipment", "displayOrder": 6},
+            "workoutSteps": workout_steps,
+        }
+        estimated_duration = int(sum(_estimate_strength_duration_seconds(e) for e in exercises))
+        workout = FitnessEquipmentWorkout(
+            workoutName=name,
+            estimatedDurationInSecs=estimated_duration,
+            workoutSegments=[segment],
+        )
+        result = safe_call(get_client().upload_workout, workout.to_dict())
+        if result["ok"] and isinstance(result["data"], dict):
+            result["data"]["workout_id"] = result["data"].get("workoutId")
+        result["fallbacks"] = fallbacks
+        return result
+
+    @mcp.tool(name="garmin_find_exercise")
+    def find_exercise(query: str = "", category: str = "", equipment: str = "", muscle: str = "") -> dict:
+        """Look up exercises before building a strength workout, to check what a name resolves to and its Garmin-enum confidence. Provide at least one of query/category/(equipment+muscle).
+
+        query: free-text fuzzy search, e.g. "cable fly" or "goblet squat" (fuzzy_search).
+        category: exact category name to browse, e.g. "Plyo", "Calf Raise" (browse_category).
+        equipment: comma-separated equipment tags to filter by, e.g. "band" (filter_by).
+        muscle: comma-separated target muscles to filter by, e.g. "CALVES,ABDUCTORS" (filter_by).
+
+        Each result includes enum_confidence: 'confirmed' (round-trip tested live), 'guessed'
+        (same pattern as a confirmed exercise, untested), or 'todo' (no trustworthy enum -
+        garmin_create_strength_workout will use the free-text Notes fallback for these).
+        """
+        import exercise_db
+
+        if query:
+            return safe_call(exercise_db.fuzzy_search, query)
+        if category:
+            return safe_call(exercise_db.browse_category, category)
+        if equipment or muscle:
+            return safe_call(
+                exercise_db.filter_by,
+                equipment=[e.strip() for e in equipment.split(",") if e.strip()] or None,
+                muscles=[m.strip() for m in muscle.split(",") if m.strip()] or None,
+            )
+        return {"ok": False, "error": "Provide at least one of query, category, or equipment/muscle"}
+
+    @mcp.tool(name="garmin_get_activity_exercise_sets")
+    def get_activity_exercise_sets(activity_id: str) -> dict:
+        """Get per-set detail (reps, weight, rest, exercise category) for a completed Garmin strength activity, where the watch/app populated it. activity_id: Garmin activity ID (from garmin_get_activities)."""
+        return safe_call(get_client().get_activity_exercise_sets, activity_id)
 
     @mcp.tool(name="garmin_schedule_workout")
     def schedule_workout(workout_id: str, date: str) -> dict:
