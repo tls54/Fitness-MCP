@@ -639,17 +639,26 @@ def register(mcp: FastMCP) -> None:
             if "sets" not in exercise or "rest_seconds" not in exercise:
                 raise ValueError(f"Exercise {exercise!r} must set 'sets' and 'rest_seconds'")
 
+        # sportTypeId 5 / "strength_training" - confirmed live: garminconnect's
+        # FitnessEquipmentWorkout class defaults to {6, "fitness_equipment"}, which Garmin's
+        # own backend actually echoes back as "cardio_training", not a strength workout at
+        # all (same class of bug as the earlier distance/lap.button mismatch). The correct
+        # sportType was confirmed by inspecting a workout hand-built via Garmin Connect's own
+        # UI with garmin_list_workouts, which showed {5, "strength_training"}.
+        STRENGTH_SPORT_TYPE = {"sportTypeId": 5, "sportTypeKey": "strength_training", "displayOrder": 5}
+
         order = [0]
         fallbacks: list[dict] = []
         workout_steps = [_build_strength_round(e, order, fallbacks) for e in exercises]
         segment = {
             "segmentOrder": 1,
-            "sportType": {"sportTypeId": 6, "sportTypeKey": "fitness_equipment", "displayOrder": 6},
+            "sportType": STRENGTH_SPORT_TYPE,
             "workoutSteps": workout_steps,
         }
         estimated_duration = int(sum(_estimate_strength_duration_seconds(e) for e in exercises))
         workout = FitnessEquipmentWorkout(
             workoutName=name,
+            sportType=STRENGTH_SPORT_TYPE,
             estimatedDurationInSecs=estimated_duration,
             workoutSegments=[segment],
         )
