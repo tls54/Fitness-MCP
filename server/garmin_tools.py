@@ -53,9 +53,9 @@ def _build_step_target(step: dict) -> dict:
       - pace_min_per_km / pace_max_per_km: seconds-per-km bounds (slower/faster) -> pace zone target.
       - hr_zone: int 1-5 -> heart rate zone target.
       - hr_min / hr_max: bpm bounds -> heart rate target.
-      - cadence_min / cadence_max: steps-per-minute bounds -> cadence target. UNVERIFIED -
-        workoutTargetTypeId 3 is a guess by analogy (library's TargetType.CADENCE=3), not yet
-        confirmed live the way pace/distance/reps were. Test before relying on it.
+      - cadence_min / cadence_max: steps-per-minute bounds -> cadence target. workoutTargetTypeId 3
+        round-trips correctly (confirmed via garmin_get_workout_by_id); not yet visually confirmed
+        rendering a live cadence target on-device the way pace/HR have been.
     """
     pace_min = step.get("pace_min_per_km")
     pace_max = step.get("pace_max_per_km")
@@ -101,8 +101,10 @@ def _build_step_target(step: dict) -> dict:
     if cadence_min is not None or cadence_max is not None:
         if cadence_min is None or cadence_max is None:
             raise ValueError("cadence_min and cadence_max must be set together")
+        # id 3 confirmed live (round-trips correctly); Garmin's real key is "cadence", not
+        # "cadence.zone" as guessed - cosmetic label fix, the id is what Garmin keys off.
         return {
-            "targetType": {"workoutTargetTypeId": 3, "workoutTargetTypeKey": "cadence.zone", "displayOrder": 3},
+            "targetType": {"workoutTargetTypeId": 3, "workoutTargetTypeKey": "cadence", "displayOrder": 3},
             "targetValueOne": float(cadence_min),
             "targetValueTwo": float(cadence_max),
         }
@@ -158,8 +160,7 @@ def _build_workout_step(step: dict, order: list[int]) -> "object":
         end_condition = {"conditionTypeId": 2, "conditionTypeKey": "time", "displayOrder": 2, "displayable": True}
         end_condition_value = float(seconds)
     else:
-        # UNVERIFIED - id 4 is a guess by analogy with the library's ConditionType.CALORIES=4,
-        # the same source that was wrong for distance/lap.button. Test before relying on it.
+        # Confirmed live via garmin_get_workout_by_id: id 4 round-trips exactly as "calories".
         end_condition = {"conditionTypeId": 4, "conditionTypeKey": "calories", "displayOrder": 2, "displayable": True}
         end_condition_value = float(calories)
 
@@ -593,7 +594,7 @@ def register(mcp: FastMCP) -> None:
         steps: an ordered list of step dicts, each one of:
           - {"kind": "warmup"|"cooldown"|"interval"|"recovery"|"rest", "distance_km": float, ...} - a step ending after a distance
           - {"kind": "warmup"|"cooldown"|"interval"|"recovery"|"rest", "seconds": float, ...} - a step ending after a duration
-          - {"kind": "warmup"|"cooldown"|"interval"|"recovery"|"rest", "calories": float, ...} - a step ending after burning N calories (UNVERIFIED - untested on a live device, see code comments)
+          - {"kind": "warmup"|"cooldown"|"interval"|"recovery"|"rest", "calories": float, ...} - a step ending after burning N calories
           - {"kind": "repeat", "repeat_count": int, "steps": [...]} - repeats a nested list of steps N times
 
         Any non-repeat step can also carry an on-watch target (shown live during the step,
@@ -601,7 +602,7 @@ def register(mcp: FastMCP) -> None:
           - "pace_min_per_km" + "pace_max_per_km": seconds-per-km bounds, e.g. 330 (5:30) to 360 (6:00)
           - "hr_zone": int 1-5, referencing the athlete's predefined Garmin HR zones
           - "hr_min" + "hr_max": explicit bpm bounds
-          - "cadence_min" + "cadence_max": steps-per-minute bounds (UNVERIFIED - untested on a live device)
+          - "cadence_min" + "cadence_max": steps-per-minute bounds
         Omit all of these for an unconstrained "just run/rest" step.
 
         Example for "4km easy, then 6x(20s stride + 60s easy jog recovery), then 1km easy cooldown",
