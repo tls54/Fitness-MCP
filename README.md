@@ -18,6 +18,8 @@ Both sports' tools merged into a single MCP server, namespaced with `garmin_`/`s
 
 Local dev: `cd server && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt`, then run `python main.py` with the env vars above pointed at local token paths.
 
+**Note:** Strava now requires a paid API plan for third-party apps. If Strava tools start returning `403 Forbidden` with `{"resource":"Application","field":"Status","code":"Inactive"}`, it means the registered Strava API application has been deactivated — check/reactivate it at [strava.com/settings/api](https://www.strava.com/settings/api).
+
 ## Security
 
 The server is read-only against the Garmin/Strava APIs it wraps (aside from creating/scheduling/deleting Garmin workouts, which the user explicitly requests). Credentials/tokens are never committed (see `server/.gitignore`). The endpoint additionally requires a bearer token on every request since it's reachable over the network rather than spawned locally.
