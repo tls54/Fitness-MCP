@@ -190,6 +190,17 @@ def _build_strength_round(exercise: dict, order: list[int], fallbacks: list[dict
     rest_seconds = exercise["rest_seconds"]
     target_desc = f"{reps} reps" if reps is not None else f"{seconds}s"
 
+    weight_kg = exercise.get("weight_kg")
+    # Confirmed live via garmin_get_workout_by_id on a workout hand-built with Garmin's own
+    # weight picker: weightValue is a plain float in kilograms, weightUnit is this exact dict.
+    weight_kwargs = (
+        {"weightValue": float(weight_kg), "weightUnit": {"unitId": 8, "unitKey": "kilogram", "factor": 1000.0}}
+        if weight_kg is not None
+        else {}
+    )
+    if weight_kg is not None:
+        target_desc += f" @ {weight_kg}kg"
+
     order[0] += 1
     exercise_step_order = order[0]
     if reps is not None:
@@ -213,6 +224,7 @@ def _build_strength_round(exercise: dict, order: list[int], fallbacks: list[dict
             targetType={"workoutTargetTypeId": 1, "workoutTargetTypeKey": "no.target", "displayOrder": 1},
             category=match["garmin_category_enum"],
             exerciseName=match["garmin_name_enum"],
+            **weight_kwargs,
         )
     else:
         fallbacks.append(
@@ -232,6 +244,7 @@ def _build_strength_round(exercise: dict, order: list[int], fallbacks: list[dict
             endConditionValue=end_condition_value,
             targetType={"workoutTargetTypeId": 1, "workoutTargetTypeKey": "no.target", "displayOrder": 1},
             description=f"{name} - {target_desc}",
+            **weight_kwargs,
         )
 
     order[0] += 1
@@ -619,7 +632,8 @@ def register(mcp: FastMCP) -> None:
                        Garmin categories, e.g. "Squat" vs "Banded Exercises"),
            "sets": int,
            "rest_seconds": float,
-           "reps": int}   # OR "seconds": float instead of "reps", for timed holds like planks
+           "reps": int,   # OR "seconds": float instead of "reps", for timed holds like planks
+           "weight_kg": float}  # optional - shows a fixed weight target for the exercise
 
         Each exercise becomes one repeating round of (exercise, rest) x sets - e.g. sets=3,
         reps=12, rest_seconds=60 becomes 3 rounds of "12 reps" then "rest 60s".
