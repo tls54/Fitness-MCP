@@ -307,7 +307,11 @@ def _estimate_step_duration_seconds(step: dict, pace_sec_per_km: float) -> float
         )
     if step.get("seconds") is not None:
         return float(step["seconds"])
-    return float(step["distance_km"]) * pace_sec_per_km
+    if step.get("distance_km") is not None:
+        return float(step["distance_km"]) * pace_sec_per_km
+    # calorie-based steps: no principled way to estimate duration from calories alone
+    # without pace/HR/weight data, so just contribute a rough placeholder to the total.
+    return 300.0
 
 
 def date_range(start: str, end: str) -> list[str]:
