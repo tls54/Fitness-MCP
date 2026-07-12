@@ -50,15 +50,20 @@ def _build_step_target(step: dict) -> dict:
     """Build the targetType (+ target value fields) for a step from optional pace/HR keys.
 
     Supported keys (at most one group):
-      - pace_min_per_km / pace_max_per_km: seconds-per-km bounds (slower/faster) -> speed zone target.
+      - pace_min_per_km / pace_max_per_km: seconds-per-km bounds (slower/faster) -> pace zone target.
       - hr_zone: int 1-5 -> heart rate zone target.
       - hr_min / hr_max: bpm bounds -> heart rate target.
+      - cadence_min / cadence_max: steps-per-minute bounds -> cadence target. UNVERIFIED -
+        workoutTargetTypeId 3 is a guess by analogy (library's TargetType.CADENCE=3), not yet
+        confirmed live the way pace/distance/reps were. Test before relying on it.
     """
     pace_min = step.get("pace_min_per_km")
     pace_max = step.get("pace_max_per_km")
     hr_zone = step.get("hr_zone")
     hr_min = step.get("hr_min")
     hr_max = step.get("hr_max")
+    cadence_min = step.get("cadence_min")
+    cadence_max = step.get("cadence_max")
 
     if pace_min is not None or pace_max is not None:
         if pace_min is None or pace_max is None:
@@ -66,8 +71,14 @@ def _build_step_target(step: dict) -> dict:
         # pace_min_per_km is the faster (smaller sec/km) bound, pace_max_per_km the slower one.
         # Garmin targets are in speed (m/s), where higher = faster, so they invert vs. pace:
         # targetValueOne = min speed (from the slower pace bound), targetValueTwo = max speed (from the faster one).
+        #
+        # CORRECTED: workoutTargetTypeId 5 ("speed.zone") is NOT the real pace target - it's
+        # what the garminconnect library's TargetType constants claim, but Garmin's own app
+        # displayed it as a generic speed target, not pace. Confirmed correct value (id 6,
+        # "pace.zone") by reading back a workout via garmin_get_workout_by_id after manually
+        # fixing the target type for it in Garmin Connect's own UI.
         return {
-            "targetType": {"workoutTargetTypeId": 5, "workoutTargetTypeKey": "speed.zone", "displayOrder": 5},
+            "targetType": {"workoutTargetTypeId": 6, "workoutTargetTypeKey": "pace.zone", "displayOrder": 6},
             "targetValueOne": 1000.0 / float(pace_max),
             "targetValueTwo": 1000.0 / float(pace_min),
         }
@@ -85,6 +96,15 @@ def _build_step_target(step: dict) -> dict:
             "targetType": {"workoutTargetTypeId": 4, "workoutTargetTypeKey": "heart.rate.zone", "displayOrder": 4},
             "targetValueOne": float(hr_min),
             "targetValueTwo": float(hr_max),
+        }
+
+    if cadence_min is not None or cadence_max is not None:
+        if cadence_min is None or cadence_max is None:
+            raise ValueError("cadence_min and cadence_max must be set together")
+        return {
+            "targetType": {"workoutTargetTypeId": 3, "workoutTargetTypeKey": "cadence.zone", "displayOrder": 3},
+            "targetValueOne": float(cadence_min),
+            "targetValueTwo": float(cadence_max),
         }
 
     return {"targetType": {"workoutTargetTypeId": 1, "workoutTargetTypeKey": "no.target", "displayOrder": 1}}
@@ -125,17 +145,23 @@ def _build_workout_step(step: dict, order: list[int]) -> "object":
 
     distance_km = step.get("distance_km")
     seconds = step.get("seconds")
-    if (distance_km is None) == (seconds is None):
-        raise ValueError(f"Step {step!r} must set exactly one of distance_km or seconds")
+    calories = step.get("calories")
+    if sum(v is not None for v in (distance_km, seconds, calories)) != 1:
+        raise ValueError(f"Step {step!r} must set exactly one of distance_km, seconds, or calories")
 
     if distance_km is not None:
         # Garmin's own schema uses conditionTypeId 3 for distance; 1 is "lap.button" (confirmed
         # empirically - Garmin's upload response echoed conditionTypeId=1 back as "lap.button").
         end_condition = {"conditionTypeId": 3, "conditionTypeKey": "distance", "displayOrder": 2, "displayable": True}
         end_condition_value = float(distance_km) * 1000.0
-    else:
+    elif seconds is not None:
         end_condition = {"conditionTypeId": 2, "conditionTypeKey": "time", "displayOrder": 2, "displayable": True}
         end_condition_value = float(seconds)
+    else:
+        # UNVERIFIED - id 4 is a guess by analogy with the library's ConditionType.CALORIES=4,
+        # the same source that was wrong for distance/lap.button. Test before relying on it.
+        end_condition = {"conditionTypeId": 4, "conditionTypeKey": "calories", "displayOrder": 2, "displayable": True}
+        end_condition_value = float(calories)
 
     type_id = _STEP_KIND_TO_TYPE_ID[kind]
     target = _build_step_target(step)
@@ -563,13 +589,15 @@ def register(mcp: FastMCP) -> None:
         steps: an ordered list of step dicts, each one of:
           - {"kind": "warmup"|"cooldown"|"interval"|"recovery"|"rest", "distance_km": float, ...} - a step ending after a distance
           - {"kind": "warmup"|"cooldown"|"interval"|"recovery"|"rest", "seconds": float, ...} - a step ending after a duration
+          - {"kind": "warmup"|"cooldown"|"interval"|"recovery"|"rest", "calories": float, ...} - a step ending after burning N calories (UNVERIFIED - untested on a live device, see code comments)
           - {"kind": "repeat", "repeat_count": int, "steps": [...]} - repeats a nested list of steps N times
 
-        Any non-repeat step can also carry an on-watch pace or heart-rate target (shown live
-        during the step, alongside its distance/time countdown) via one of:
+        Any non-repeat step can also carry an on-watch target (shown live during the step,
+        alongside its distance/time/calorie countdown) via one of:
           - "pace_min_per_km" + "pace_max_per_km": seconds-per-km bounds, e.g. 330 (5:30) to 360 (6:00)
           - "hr_zone": int 1-5, referencing the athlete's predefined Garmin HR zones
           - "hr_min" + "hr_max": explicit bpm bounds
+          - "cadence_min" + "cadence_max": steps-per-minute bounds (UNVERIFIED - untested on a live device)
         Omit all of these for an unconstrained "just run/rest" step.
 
         Example for "4km easy, then 6x(20s stride + 60s easy jog recovery), then 1km easy cooldown",
