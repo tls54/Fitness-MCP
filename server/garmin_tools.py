@@ -37,6 +37,26 @@ def safe_call(fn, *args, **kwargs) -> dict:
         return {"ok": False, "error": str(e)}
 
 
+def safe_get_client() -> tuple[garminconnect.Garmin | None, dict | None]:
+    """get_client() logs in over the network and can fail (bad creds, MFA
+    challenge, Garmin outage). Callers must go through this instead of calling
+    get_client() directly so a login failure returns the same {"ok": False,
+    "error": ...} shape as any other tool error, instead of an unhandled
+    exception - get_client() raising inside a bare `safe_call(get_client().x, ...)`
+    argument list happens before safe_call's own try/except is entered."""
+    try:
+        return get_client(), None
+    except Exception as e:
+        return None, {"ok": False, "error": str(e)}
+
+
+def client_call(method_name: str, *args, **kwargs) -> dict:
+    client, err = safe_get_client()
+    if err:
+        return err
+    return safe_call(getattr(client, method_name), *args, **kwargs)
+
+
 _STEP_KIND_TO_TYPE_ID = {
     "warmup": 1,
     "cooldown": 2,
@@ -64,6 +84,21 @@ def _build_step_target(step: dict) -> dict:
     hr_max = step.get("hr_max")
     cadence_min = step.get("cadence_min")
     cadence_max = step.get("cadence_max")
+
+    groups_set = sum(
+        bool(pair)
+        for pair in (
+            (pace_min is not None or pace_max is not None),
+            (hr_zone is not None),
+            (hr_min is not None or hr_max is not None),
+            (cadence_min is not None or cadence_max is not None),
+        )
+    )
+    if groups_set > 1:
+        raise ValueError(
+            f"Step {step!r} sets more than one target group (pace/hr_zone/hr_min+max/cadence) - "
+            "only one target group is supported per step"
+        )
 
     if pace_min is not None or pace_max is not None:
         if pace_min is None or pace_max is None:
@@ -374,44 +409,46 @@ def register(mcp: FastMCP) -> None:
     @mcp.tool(name="garmin_get_sleep")
     def get_sleep(date: str = "") -> dict:
         """Get detailed sleep data for a given date: sleep stages (deep, light, REM, awake), total sleep duration, sleep score, respiration, SpO2, and sleep start/end times. date: YYYY-MM-DD, defaults to today."""
-        return safe_call(get_client().get_sleep_data, date or today_str())
+        return client_call("get_sleep_data", date or today_str())
 
     @mcp.tool(name="garmin_get_hrv")
     def get_hrv(date: str = "") -> dict:
         """Get Heart Rate Variability (HRV) data for a date: overnight HRV summary, 5-minute readings, baseline, and status (Balanced / Unbalanced / Low). date: YYYY-MM-DD, defaults to today."""
-        return safe_call(get_client().get_hrv_data, date or today_str())
+        return client_call("get_hrv_data", date or today_str())
 
     @mcp.tool(name="garmin_get_body_battery")
     def get_body_battery(date: str = "") -> dict:
         """Get Body Battery levels for a date: charging/draining events, start/end levels, and the impact of sleep and activities. date: YYYY-MM-DD, defaults to today."""
         d = date or today_str()
-        return safe_call(get_client().get_body_battery, d, d)
+        return client_call("get_body_battery", d, d)
 
     @mcp.tool(name="garmin_get_stress")
     def get_stress(date: str = "") -> dict:
         """Get stress data for a date: average stress, max stress, rest stress, and time in low/medium/high/rest stress categories. date: YYYY-MM-DD, defaults to today."""
-        return safe_call(get_client().get_stress_data, date or today_str())
+        return client_call("get_stress_data", date or today_str())
 
     @mcp.tool(name="garmin_get_heart_rate")
     def get_heart_rate(date: str = "") -> dict:
         """Get resting heart rate and heart rate timeline for a date: min HR, max HR, resting HR, and timestamped readings throughout the day. date: YYYY-MM-DD, defaults to today."""
-        return safe_call(get_client().get_heart_rates, date or today_str())
+        return client_call("get_heart_rates", date or today_str())
 
     @mcp.tool(name="garmin_get_spo2")
     def get_spo2(date: str = "") -> dict:
         """Get SpO2 (blood oxygen saturation) readings for a date: average, min, max, and overnight continuous readings. date: YYYY-MM-DD, defaults to today."""
-        return safe_call(get_client().get_spo2_data, date or today_str())
+        return client_call("get_spo2_data", date or today_str())
 
     @mcp.tool(name="garmin_get_respiration")
     def get_respiration(date: str = "") -> dict:
         """Get breathing rate (respiration) data for a date: average, min, max breaths per minute throughout the day and overnight. date: YYYY-MM-DD, defaults to today."""
-        return safe_call(get_client().get_respiration_data, date or today_str())
+        return client_call("get_respiration_data", date or today_str())
 
     @mcp.tool(name="garmin_get_steps_and_activity")
     def get_steps_and_activity(date: str = "") -> dict:
         """Get daily steps, floors climbed, distance, calories (active + resting), and intensity minutes for a date. date: YYYY-MM-DD, defaults to today."""
         d = date or today_str()
-        client = get_client()
+        client, err = safe_get_client()
+        if err:
+            return err
         steps = safe_call(client.get_steps_data, d)
         stats = safe_call(client.get_stats, d)
         return {"ok": True, "data": {"steps": steps.get("data"), "stats": stats.get("data")}}
@@ -419,71 +456,71 @@ def register(mcp: FastMCP) -> None:
     @mcp.tool(name="garmin_get_hydration")
     def get_hydration(date: str = "") -> dict:
         """Get daily hydration data: fluid intake in ml and goal for a date. date: YYYY-MM-DD, defaults to today."""
-        return safe_call(get_client().get_hydration_data, date or today_str())
+        return client_call("get_hydration_data", date or today_str())
 
     @mcp.tool(name="garmin_get_daily_summary")
     def get_daily_summary(date: str = "") -> dict:
         """Get a comprehensive daily summary including steps, calories, HR, stress, Body Battery, intensity minutes, and floors for a date. Good all-in-one snapshot. date: YYYY-MM-DD, defaults to today."""
-        return safe_call(get_client().get_user_summary, date or today_str())
+        return client_call("get_user_summary", date or today_str())
 
     # ── Training & fitness ───────────────────────────────────────────────────
     @mcp.tool(name="garmin_get_training_readiness")
     def get_training_readiness(date: str = "") -> dict:
         """Get Garmin's Training Readiness score (0-100) for a date, with component scores for sleep, recovery, HRV, and training load. date: YYYY-MM-DD, defaults to today."""
-        return safe_call(get_client().get_training_readiness, date or today_str())
+        return client_call("get_training_readiness", date or today_str())
 
     @mcp.tool(name="garmin_get_training_status")
     def get_training_status(date: str = "") -> dict:
         """Get Garmin's training status: status label (Maintaining/Productive/Unproductive/Detraining/Overreaching), acute/chronic load, load focus, and VO2 max trend. date: YYYY-MM-DD, defaults to today."""
-        return safe_call(get_client().get_training_status, date or today_str())
+        return client_call("get_training_status", date or today_str())
 
     @mcp.tool(name="garmin_get_vo2max_and_fitness_metrics")
     def get_vo2max_and_fitness_metrics(date: str = "") -> dict:
         """Get VO2 max estimate and fitness age. Includes running VO2 max and cycling VO2 max if available. date: YYYY-MM-DD, defaults to today."""
-        return safe_call(get_client().get_max_metrics, date or today_str())
+        return client_call("get_max_metrics", date or today_str())
 
     @mcp.tool(name="garmin_get_lactate_threshold")
     def get_lactate_threshold() -> dict:
         """Get Garmin's lactate threshold estimate: threshold heart rate, threshold pace, and the associated training zone."""
-        return safe_call(get_client().get_lactate_threshold)
+        return client_call("get_lactate_threshold")
 
     @mcp.tool(name="garmin_get_race_predictions")
     def get_race_predictions() -> dict:
         """Get Garmin's predicted race finish times for 5K, 10K, half marathon, and marathon based on current fitness."""
-        return safe_call(get_client().get_race_predictions)
+        return client_call("get_race_predictions")
 
     @mcp.tool(name="garmin_get_endurance_score")
     def get_endurance_score(start_date: str = "", end_date: str = "") -> dict:
         """Get Garmin's Endurance Score for a date range - measures aerobic fitness capacity built up over time. start_date/end_date: YYYY-MM-DD, default to 30 days ago / today."""
         start = start_date or days_ago(30)
         end = end_date or today_str()
-        return safe_call(get_client().get_endurance_score, start, end)
+        return client_call("get_endurance_score", start, end)
 
     @mcp.tool(name="garmin_get_hill_score")
     def get_hill_score(start_date: str = "", end_date: str = "") -> dict:
         """Get Garmin's Hill Score for a date range - measures ability to handle elevation gain in runs. start_date/end_date: YYYY-MM-DD, default to 30 days ago / today."""
         start = start_date or days_ago(30)
         end = end_date or today_str()
-        return safe_call(get_client().get_hill_score, start, end)
+        return client_call("get_hill_score", start, end)
 
     @mcp.tool(name="garmin_get_running_tolerance")
     def get_running_tolerance(start_date: str = "", end_date: str = "", aggregation: str = "weekly") -> dict:
         """Get Garmin's running tolerance/load data over a date range (weekly aggregation by default). Shows acute load, chronic load, and injury risk signals. start_date/end_date: YYYY-MM-DD, default to 28 days ago / today. aggregation: 'weekly' or 'daily'."""
         start = start_date or days_ago(28)
         end = end_date or today_str()
-        return safe_call(get_client().get_running_tolerance, start, end, aggregation)
+        return client_call("get_running_tolerance", start, end, aggregation)
 
     @mcp.tool(name="garmin_get_personal_records")
     def get_personal_records() -> dict:
         """Get personal records (PRs) for running and other activities: fastest mile, 5K, 10K, half marathon, longest run, etc."""
-        return safe_call(get_client().get_personal_record)
+        return client_call("get_personal_record")
 
     @mcp.tool(name="garmin_get_progress_summary")
     def get_progress_summary(start_date: str = "", end_date: str = "", metric: str = "distance") -> dict:
         """Get training progress summary between two dates, grouped by activity type. Shows distance, time, and effort trends. start_date/end_date: YYYY-MM-DD, default to 28 days ago / today. metric: 'distance', 'duration', or 'calories'."""
         start = start_date or days_ago(28)
         end = end_date or today_str()
-        return safe_call(get_client().get_progress_summary_between_dates, start, end, metric)
+        return client_call("get_progress_summary_between_dates", start, end, metric)
 
     # ── Activities ───────────────────────────────────────────────────────────
     @mcp.tool(name="garmin_get_activities")
@@ -491,43 +528,45 @@ def register(mcp: FastMCP) -> None:
         """Get a list of recent Garmin activities with summary stats: type, date, distance, duration, avg HR, calories, Training Effect, aerobic/anaerobic load. start_date/end_date: YYYY-MM-DD, default to 14 days ago / today. activity_type: e.g. 'running', 'cycling', 'hiking' (optional)."""
         start = start_date or days_ago(14)
         end = end_date or today_str()
-        return safe_call(get_client().get_activities_by_date, start, end, activity_type or None)
+        return client_call("get_activities_by_date", start, end, activity_type or None)
 
     @mcp.tool(name="garmin_get_activity_detail")
     def get_activity_detail(activity_id: str) -> dict:
         """Get full detail for a single Garmin activity by ID: splits, HR zones, Training Effect, aerobic/anaerobic load, pace, elevation, cadence. activity_id: Garmin activity ID (from garmin_get_activities)."""
-        return safe_call(get_client().get_activity, activity_id)
+        return client_call("get_activity", activity_id)
 
     @mcp.tool(name="garmin_get_activity_splits")
     def get_activity_splits(activity_id: str) -> dict:
         """Get per-kilometre or per-mile splits for a Garmin activity: pace, HR, elevation for each split. activity_id: Garmin activity ID (from garmin_get_activities)."""
-        return safe_call(get_client().get_activity_splits, activity_id)
+        return client_call("get_activity_splits", activity_id)
 
     @mcp.tool(name="garmin_get_activity_hr_zones")
     def get_activity_hr_zones(activity_id: str) -> dict:
         """Get time spent in each HR zone for a Garmin activity. activity_id: Garmin activity ID (from garmin_get_activities)."""
-        return safe_call(get_client().get_activity_hr_in_timezones, activity_id)
+        return client_call("get_activity_hr_in_timezones", activity_id)
 
     @mcp.tool(name="garmin_get_activity_streams")
     def get_activity_streams(activity_id: str, max_points: int = 2000) -> dict:
         """Get time-series chart data for a Garmin activity: cadence, HR, speed, power, elevation, and other metrics sampled throughout the activity. Up to 2000 data points. Use this for detailed analysis of effort, cadence consistency, HR drift, or power curves. activity_id: Garmin activity ID. max_points: max chart points to return (default/max 2000)."""
-        return safe_call(get_client().get_activity_details, activity_id, maxchart=max_points)
+        return client_call("get_activity_details", activity_id, maxchart=max_points)
 
     @mcp.tool(name="garmin_get_activity_power_zones")
     def get_activity_power_zones(activity_id: str) -> dict:
         """Get time spent in each power zone for a Garmin activity. Only meaningful for activities with actual power data (e.g. BikeErg with ERG Logbook connected). activity_id: Garmin activity ID."""
-        return safe_call(get_client().get_activity_power_in_timezones, activity_id)
+        return client_call("get_activity_power_in_timezones", activity_id)
 
     @mcp.tool(name="garmin_get_last_activity")
     def get_last_activity() -> dict:
         """Get the most recent Garmin activity with full summary stats."""
-        return safe_call(get_client().get_last_activity)
+        return client_call("get_last_activity")
 
     # ── Trends / history ─────────────────────────────────────────────────────
     @mcp.tool(name="garmin_get_sleep_history")
     def get_sleep_history(days: int = 14) -> dict:
         """Get sleep scores and stage breakdown for the past N days to identify trends. days: number of past days (default 14, max 28)."""
-        client = get_client()
+        client, err = safe_get_client()
+        if err:
+            return err
         n = min(days, 28)
         history = []
         for i in range(n):
@@ -540,7 +579,9 @@ def register(mcp: FastMCP) -> None:
     @mcp.tool(name="garmin_get_hrv_history")
     def get_hrv_history(days: int = 14) -> dict:
         """Get overnight HRV values for the past N days to track recovery trends. days: number of past days (default 14, max 28)."""
-        client = get_client()
+        client, err = safe_get_client()
+        if err:
+            return err
         n = min(days, 28)
         history = []
         for i in range(n):
@@ -553,7 +594,9 @@ def register(mcp: FastMCP) -> None:
     @mcp.tool(name="garmin_get_body_battery_history")
     def get_body_battery_history(days: int = 14) -> dict:
         """Get end-of-day Body Battery levels for the past N days to track energy trends. days: number of past days (default 14)."""
-        client = get_client()
+        client, err = safe_get_client()
+        if err:
+            return err
         history = []
         for i in range(days):
             day = days_ago(i)
@@ -565,18 +608,24 @@ def register(mcp: FastMCP) -> None:
     @mcp.tool(name="garmin_get_weekly_summary")
     def get_weekly_summary(end_date: str = "") -> dict:
         """Get a weekly health and activity summary: total steps, active calories, intensity minutes, stress average, and sleep averages for the past 7 days. end_date: YYYY-MM-DD, defaults to today."""
-        return safe_call(get_client().get_weekly_stress, end_date or today_str())
+        return client_call("get_weekly_stress", end_date or today_str())
 
     # ── Lifestyle / habits ───────────────────────────────────────────────────
     @mcp.tool(name="garmin_get_lifestyle_log")
     def get_lifestyle_log(date: str = "") -> dict:
         """Get the lifestyle/habit log for a date: which manually-tracked habits (e.g. healthy meals, morning caffeine, moderate exercise, ankle exercises) were logged that day and whether each was completed. date: YYYY-MM-DD, defaults to today."""
-        return safe_call(_lifestyle_log, get_client(), date or today_str())
+        client, err = safe_get_client()
+        if err:
+            return err
+        return safe_call(_lifestyle_log, client, date or today_str())
 
     @mcp.tool(name="garmin_get_lifestyle_log_history")
     def get_lifestyle_log_history(start_date: str, end_date: str = "") -> dict:
         """Get lifestyle/habit log compliance across a date range, as a day-by-day table showing whether each tracked habit was done, missed, or not logged. start_date: YYYY-MM-DD, required. end_date: YYYY-MM-DD, defaults to today."""
-        return safe_call(_lifestyle_log_history, get_client(), start_date, end_date or today_str())
+        client, err = safe_get_client()
+        if err:
+            return err
+        return safe_call(_lifestyle_log_history, client, start_date, end_date or today_str())
 
     # ── Body & weight ────────────────────────────────────────────────────────
     @mcp.tool(name="garmin_get_weight")
@@ -584,7 +633,7 @@ def register(mcp: FastMCP) -> None:
         """Get body weight and composition data for a date range. Returns weight, BMI, body fat % if measured. start_date/end_date: YYYY-MM-DD, default to 14 days ago / today."""
         start = start_date or days_ago(14)
         end = end_date or today_str()
-        return safe_call(get_client().get_body_composition, start, end)
+        return client_call("get_body_composition", start, end)
 
     # ── Workouts (write) ─────────────────────────────────────────────────────
     @mcp.tool(name="garmin_create_running_workout")
@@ -638,7 +687,7 @@ def register(mcp: FastMCP) -> None:
             estimatedDurationInSecs=estimated_duration,
             workoutSegments=[segment],
         )
-        result = safe_call(get_client().upload_running_workout, workout)
+        result = client_call("upload_running_workout", workout)
         if result["ok"] and isinstance(result["data"], dict):
             result["data"]["workout_id"] = result["data"].get("workoutId")
         return result
@@ -712,7 +761,7 @@ def register(mcp: FastMCP) -> None:
             estimatedDurationInSecs=estimated_duration,
             workoutSegments=[segment],
         )
-        result = safe_call(get_client().upload_workout, workout.to_dict())
+        result = client_call("upload_workout", workout.to_dict())
         if result["ok"] and isinstance(result["data"], dict):
             result["data"]["workout_id"] = result["data"].get("workoutId")
         result["fallbacks"] = fallbacks
@@ -748,27 +797,27 @@ def register(mcp: FastMCP) -> None:
     @mcp.tool(name="garmin_get_activity_exercise_sets")
     def get_activity_exercise_sets(activity_id: str) -> dict:
         """Get per-set detail (reps, weight, rest, exercise category) for a completed Garmin strength activity, where the watch/app populated it. activity_id: Garmin activity ID (from garmin_get_activities)."""
-        return safe_call(get_client().get_activity_exercise_sets, activity_id)
+        return client_call("get_activity_exercise_sets", activity_id)
 
     @mcp.tool(name="garmin_schedule_workout")
     def schedule_workout(workout_id: str, date: str) -> dict:
         """Schedule a previously-created Garmin workout onto a specific calendar date so it syncs to the watch. workout_id: from garmin_create_running_workout. date: YYYY-MM-DD."""
-        return safe_call(get_client().schedule_workout, workout_id, date)
+        return client_call("schedule_workout", workout_id, date)
 
     @mcp.tool(name="garmin_list_workouts")
     def list_workouts(limit: int = 20) -> dict:
         """List workouts stored in Garmin Connect (most recently created first). limit: max results (default 20)."""
-        return safe_call(get_client().get_workouts, 0, limit)
+        return client_call("get_workouts", 0, limit)
 
     @mcp.tool(name="garmin_delete_workout")
     def delete_workout(workout_id: str) -> dict:
         """Delete a workout from Garmin Connect by its workout_id."""
-        return safe_call(get_client().delete_workout, workout_id)
+        return client_call("delete_workout", workout_id)
 
     @mcp.tool(name="garmin_get_workout_by_id")
     def get_workout_by_id(workout_id: str) -> dict:
         """Fetch a workout's full raw structure exactly as Garmin stored it, including each step's real endCondition/category/exerciseName. Use this to discover the correct Garmin enums for an exercise: build the workout using Garmin Connect's own exercise picker (app or web - guaranteed valid, unlike our free-text lookup), find its workout_id with garmin_list_workouts, fetch it here, read off the category/exerciseName Garmin actually assigned to each step, then call garmin_record_exercise_enum to save that mapping for future use. workout_id: from garmin_list_workouts or the result of garmin_create_strength_workout/garmin_create_running_workout."""
-        return safe_call(get_client().get_workout_by_id, workout_id)
+        return client_call("get_workout_by_id", workout_id)
 
     @mcp.tool(name="garmin_record_exercise_enum")
     def record_exercise_enum(

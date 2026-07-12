@@ -1,5 +1,6 @@
 """Strava tools, ported from strava/server.py onto FastMCP with a strava_ prefix."""
 
+import functools
 import json
 import os
 from datetime import datetime
@@ -67,6 +68,8 @@ def refresh_strava_tokens(tokens):
             "grant_type": "refresh_token",
         },
     )
+    if not response.ok:
+        raise RuntimeError(f"Strava token refresh failed ({response.status_code}): {response.text[:200]}")
     save_tokens(response.json())
 
 
@@ -82,6 +85,31 @@ def get_access_token() -> str:
 
 def _headers() -> dict:
     return {"Authorization": f"Bearer {get_access_token()}"}
+
+
+def _get(url: str, **kwargs) -> dict:
+    """requests.get wrapper that raises a clear error on non-2xx responses instead
+    of letting callers blindly index into an error body (e.g. {"message": "..."})
+    and hit a confusing KeyError."""
+    response = requests.get(url, **kwargs)
+    if not response.ok:
+        raise RuntimeError(f"Strava API error {response.status_code} for {url}: {response.text[:200]}")
+    return response.json()
+
+
+def safe_tool(fn):
+    """Wraps an @mcp.tool function so request/auth failures (expired token,
+    Strava API errors, rate limits) return a clean error string instead of an
+    unhandled exception/stack trace."""
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as e:
+            return f"Error: {e}"
+
+    return wrapper
 
 
 def format_seconds(seconds: int) -> str:
@@ -143,7 +171,7 @@ def _format_activity(a: dict) -> str:
         f"  Elevation: {a['total_elevation_gain']} m",
     ]
     if a.get("average_heartrate"):
-        lines.append(f"  HR: avg {a['average_heartrate']:.0f} bpm / max {a.get('max_heartrate', 'N/A'):.0f} bpm")
+        lines.append(f"  HR: avg {a['average_heartrate']:.0f} bpm")
     if a.get("average_cadence"):
         unit = "rpm" if sport == "cycle" else "spm"
         lines.append(f"  Cadence: {a['average_cadence']:.0f} {unit}")
@@ -162,11 +190,15 @@ def _fetch_streams(activity_id: int, keys: list) -> dict:
     )
     if response.status_code == 404:
         return {}
+    if not response.ok:
+        raise RuntimeError(f"Strava API error {response.status_code} fetching streams for {activity_id}: {response.text[:200]}")
     return response.json()
 
 
 def _hr_zone_analysis(hr_data: list, max_hr: int) -> list:
     total = len(hr_data)
+    if total == 0:
+        return ["  No heart rate samples available."]
     zone_bounds = [(0, 0.60), (0.60, 0.70), (0.70, 0.80), (0.80, 0.90), (0.90, 1.01)]
     zone_counts = [sum(1 for h in hr_data if max_hr * lo <= h < max_hr * hi) for lo, hi in zone_bounds]
     lines = []
@@ -177,6 +209,8 @@ def _hr_zone_analysis(hr_data: list, max_hr: int) -> list:
 
 
 def _hr_drift_analysis(hr_data: list) -> list:
+    if len(hr_data) < 2:
+        return ["  Not enough heart rate samples to compute drift."]
     mid = len(hr_data) // 2
     first = sum(hr_data[:mid]) / mid
     second = sum(hr_data[mid:]) / (len(hr_data) - mid)
@@ -202,16 +236,18 @@ def _power_zone_analysis(watts_data: list, ftp: int) -> list:
 
 def register(mcp: FastMCP) -> None:
     @mcp.tool(name="strava_ping")
+    @safe_tool
     def ping() -> str:
         """Use this to verify the Strava connection is working."""
         return f"pong — token: {get_access_token()[:6]}..."
 
     @mcp.tool(name="strava_get_athlete_stats")
+    @safe_tool
     def get_athlete_stats() -> str:
         """Returns the athlete's stats across running, cycling, and swimming: recent (4-week), YTD, and all-time totals. Always use this when the user asks about their overall training volume, yearly mileage, or fitness summary."""
         headers = _headers()
-        athlete = requests.get("https://www.strava.com/api/v3/athlete", headers=headers).json()
-        stats = requests.get(f"https://www.strava.com/api/v3/athletes/{athlete['id']}/stats", headers=headers).json()
+        athlete = _get("https://www.strava.com/api/v3/athlete", headers=headers)
+        stats = _get(f"https://www.strava.com/api/v3/athletes/{athlete['id']}/stats", headers=headers)
 
         def _fmt(totals: dict, label: str) -> str:
             return (
@@ -232,6 +268,7 @@ def register(mcp: FastMCP) -> None:
         return "\n".join(sections)
 
     @mcp.tool(name="strava_get_recent_activities")
+    @safe_tool
     def get_recent_activities(count: int = 10, after: str = "", before: str = "") -> str:
         """Returns the athlete's activities across all sports. Always use this when the user asks about specific workouts or training on a particular date. Returns activity IDs for use with strava_get_activity_detail.
         count: number of activities to return (default 10).
@@ -243,17 +280,20 @@ def register(mcp: FastMCP) -> None:
             params["after"] = int(datetime.strptime(after, "%Y-%m-%d").timestamp())
         if before:
             params["before"] = int(datetime.strptime(before, "%Y-%m-%d").timestamp())
-        activities = requests.get("https://www.strava.com/api/v3/athlete/activities", headers=_headers(), params=params).json()
+        activities = _get("https://www.strava.com/api/v3/athlete/activities", headers=_headers(), params=params)
         if not activities:
             return "No activities found."
         return f"{len(activities)} activities found:\n\n" + "\n\n".join(_format_activity(a) for a in activities)
 
     @mcp.tool(name="strava_get_activity_detail")
+    @safe_tool
     def get_activity_detail(activity_id: int) -> str:
         """Returns full detail for a single activity including splits, heart rate, cadence, power (cycling), and perceived exertion. Always use this when the user wants to analyse a specific workout in depth. Get the activity_id from strava_get_recent_activities first."""
         response = requests.get(f"https://www.strava.com/api/v3/activities/{activity_id}", headers=_headers())
         if response.status_code == 404:
             return f"Activity {activity_id} not found."
+        if not response.ok:
+            raise RuntimeError(f"Strava API error {response.status_code} for activity {activity_id}: {response.text[:200]}")
         a = response.json()
         sport = _sport_category(a.get("type", ""))
 
@@ -267,7 +307,7 @@ def register(mcp: FastMCP) -> None:
         if a.get("description"):
             lines.append(f"Description: {a['description']}")
         if a.get("average_heartrate"):
-            lines.append(f"HR: avg {a['average_heartrate']:.0f} bpm / max {a.get('max_heartrate', 'N/A'):.0f} bpm")
+            lines.append(f"HR: avg {a['average_heartrate']:.0f} bpm")
         if a.get("average_cadence"):
             unit = "rpm" if sport == "cycle" else "spm"
             lines.append(f"Cadence: {a['average_cadence']:.0f} {unit}")
@@ -299,6 +339,7 @@ def register(mcp: FastMCP) -> None:
         return "\n".join(lines)
 
     @mcp.tool(name="strava_get_best_activities")
+    @safe_tool
     def get_best_activities(metric: str = "pace", top_n: int = 5, activity_type: str = "Run") -> str:
         """Returns the athlete's best activities ranked by a metric. Always use this when the user asks about their fastest, longest, hardest, or highest-elevation workouts.
         metric: one of 'pace' (fastest), 'distance' (longest), 'time' (longest duration), 'elevation' (most climb), 'power' (highest avg power, cycling only).
@@ -308,11 +349,11 @@ def register(mcp: FastMCP) -> None:
         if metric not in METRIC_CONFIG:
             return f"Unknown metric '{metric}'. Choose from: {', '.join(METRIC_CONFIG.keys())}."
 
-        all_activities = requests.get(
+        all_activities = _get(
             "https://www.strava.com/api/v3/athlete/activities",
             headers=_headers(),
             params={"per_page": 200},
-        ).json()
+        )
 
         filtered = [a for a in all_activities if a.get("type") == activity_type or a.get("sport_type") == activity_type]
         config = METRIC_CONFIG[metric]
@@ -341,6 +382,7 @@ def register(mcp: FastMCP) -> None:
         return "\n".join(lines)
 
     @mcp.tool(name="strava_set_max_hr")
+    @safe_tool
     def set_max_hr(max_hr: int) -> str:
         """Saves the athlete's maximum heart rate for use in HR zone calculations. Always call this when the user tells you their max HR. Accurate max HR makes zone analysis significantly more meaningful."""
         if max_hr < 100 or max_hr > 250:
@@ -351,6 +393,7 @@ def register(mcp: FastMCP) -> None:
         return f"Max HR set to {max_hr} bpm. Future HR zone analysis will use this value."
 
     @mcp.tool(name="strava_set_ftp")
+    @safe_tool
     def set_ftp(ftp: int) -> str:
         """Saves the athlete's functional threshold power (FTP) for use in cycling power zone analysis. Always call this when the user tells you their FTP."""
         if ftp < 50 or ftp > 600:
@@ -361,6 +404,7 @@ def register(mcp: FastMCP) -> None:
         return f"FTP set to {ftp}w. Future cycling power zone analysis will use this value."
 
     @mcp.tool(name="strava_get_activity_streams")
+    @safe_tool
     def get_activity_streams(activity_id: int, stream_types: str = "heartrate,velocity_smooth,cadence,altitude") -> str:
         """Returns raw time-series data for an activity — one data point per second for HR, pace, cadence, and altitude.
         Use this when the user wants to see exactly how a metric changed over the course of a workout, e.g. 'show me my HR trace' or 'how did my pace change throughout the run'.
@@ -372,6 +416,9 @@ def register(mcp: FastMCP) -> None:
         if not streams:
             return f"No stream data found for activity {activity_id}."
 
+        activity = _get(f"https://www.strava.com/api/v3/activities/{activity_id}", headers=_headers())
+        sport = _sport_category(activity.get("type", ""))
+
         lines = [f"Stream data for activity {activity_id} ({len(next(iter(streams.values()))['data'])} seconds):\n"]
         for stream_type, stream in streams.items():
             data = stream["data"]
@@ -379,7 +426,7 @@ def register(mcp: FastMCP) -> None:
                 lines.append(f"Heart rate (bpm): min {min(data)}, max {max(data)}, avg {sum(data)/len(data):.0f}")
                 lines.append(f"  Trace (every 30s): {data[::30]}")
             elif stream_type == "velocity_smooth":
-                paces = [_format_pace(v) for v in data[::30] if v > 0]
+                paces = [_format_pace(v, sport) for v in data[::30] if v > 0]
                 lines.append(f"Pace (every 30s): {paces}")
             elif stream_type == "watts":
                 lines.append(f"Power (w): min {min(data)}, max {max(data)}, avg {sum(data)/len(data):.0f}")
@@ -393,12 +440,13 @@ def register(mcp: FastMCP) -> None:
         return "\n".join(lines)
 
     @mcp.tool(name="strava_get_activity_analysis")
+    @safe_tool
     def get_activity_analysis(activity_id: int) -> str:
         """Returns a structured training analysis tailored to the sport — HR zone distribution, aerobic decoupling, and effort quality for runs/hikes/swims; power zones and normalised power for cycling.
         Use this when the user wants to understand workout quality, e.g. 'how was my aerobic effort?', 'was I in zone 2?', 'did my HR drift?', 'analyse my ride'.
         For raw second-by-second data use strava_get_activity_streams instead.
         """
-        activity = requests.get(f"https://www.strava.com/api/v3/activities/{activity_id}", headers=_headers()).json()
+        activity = _get(f"https://www.strava.com/api/v3/activities/{activity_id}", headers=_headers())
         sport = _sport_category(activity.get("type", ""))
 
         streams = _fetch_streams(activity_id, ["heartrate", "velocity_smooth", "cadence", "watts"])
