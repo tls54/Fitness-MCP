@@ -80,7 +80,9 @@ def fuzzy_search(query: str, limit: int = 10) -> list[dict]:
     """
     conn = _connect()
     try:
-        fts_query = " ".join(f'"{w}"*' for w in query.split())
+        # Double embedded quotes per SQLite string-literal escaping so a word
+        # containing a literal " can't break out of the quoted FTS5 token.
+        fts_query = " ".join(f'"{w.replace(chr(34), chr(34) * 2)}"*' for w in query.split())
         rows = conn.execute(
             """
             SELECT e.* FROM exercises e

@@ -1,6 +1,7 @@
 """Garmin Connect tools, ported from garmin/garmin_server.py onto FastMCP with a garmin_ prefix."""
 
 import os
+import threading
 from datetime import date, timedelta
 
 import garminconnect
@@ -8,8 +9,11 @@ from mcp.server.fastmcp import FastMCP
 
 TOKEN_DIR = os.environ.get("GARMIN_TOKEN_DIR", os.path.expanduser("~/.garminconnect"))
 
+_client_lock = threading.Lock()
+_cached_client: garminconnect.Garmin | None = None
 
-def get_client() -> garminconnect.Garmin:
+
+def _login() -> garminconnect.Garmin:
     email = os.environ.get("GARMIN_EMAIL")
     password = os.environ.get("GARMIN_PASSWORD")
     client = garminconnect.Garmin(email=email, password=password, is_cn=False)
@@ -19,6 +23,23 @@ def get_client() -> garminconnect.Garmin:
         client.login()
         client.client.dump(TOKEN_DIR)
     return client
+
+
+def get_client() -> garminconnect.Garmin:
+    """Returns a cached, already-authenticated client, logging in only once per
+    process. Concurrent requests share this client instead of each doing their own
+    login and racing to write TOKEN_DIR."""
+    global _cached_client
+    with _client_lock:
+        if _cached_client is None:
+            _cached_client = _login()
+        return _cached_client
+
+
+def invalidate_client() -> None:
+    global _cached_client
+    with _client_lock:
+        _cached_client = None
 
 
 def today_str() -> str:
@@ -50,11 +71,28 @@ def safe_get_client() -> tuple[garminconnect.Garmin | None, dict | None]:
         return None, {"ok": False, "error": str(e)}
 
 
+_AUTH_ERROR_MARKERS = ("401", "403", "unauthorized", "authentication")
+
+
+def _looks_like_auth_error(message: str) -> bool:
+    lowered = message.lower()
+    return any(marker in lowered for marker in _AUTH_ERROR_MARKERS)
+
+
 def client_call(method_name: str, *args, **kwargs) -> dict:
     client, err = safe_get_client()
     if err:
         return err
-    return safe_call(getattr(client, method_name), *args, **kwargs)
+    result = safe_call(getattr(client, method_name), *args, **kwargs)
+    if not result["ok"] and _looks_like_auth_error(result["error"]):
+        # Cached client's session likely expired - invalidate and retry once
+        # with a fresh login rather than returning a stale auth error forever.
+        invalidate_client()
+        client, err = safe_get_client()
+        if err:
+            return err
+        result = safe_call(getattr(client, method_name), *args, **kwargs)
+    return result
 
 
 _STEP_KIND_TO_TYPE_ID = {
@@ -593,12 +631,13 @@ def register(mcp: FastMCP) -> None:
 
     @mcp.tool(name="garmin_get_body_battery_history")
     def get_body_battery_history(days: int = 14) -> dict:
-        """Get end-of-day Body Battery levels for the past N days to track energy trends. days: number of past days (default 14)."""
+        """Get end-of-day Body Battery levels for the past N days to track energy trends. days: number of past days (default 14, max 28)."""
         client, err = safe_get_client()
         if err:
             return err
+        n = min(days, 28)
         history = []
-        for i in range(days):
+        for i in range(n):
             day = days_ago(i)
             r = safe_call(client.get_body_battery, day, day)
             if r["ok"] and r["data"]:
@@ -672,21 +711,24 @@ def register(mcp: FastMCP) -> None:
         """
         from garminconnect.workout import RunningWorkout
 
-        order = [0]
-        workout_steps = [_build_workout_step(s, order) for s in steps]
-        segment = {
-            "segmentOrder": 1,
-            "sportType": {"sportTypeId": 1, "sportTypeKey": "running", "displayOrder": 1},
-            "workoutSteps": workout_steps,
-        }
-        estimated_duration = int(
-            sum(_estimate_step_duration_seconds(s, pace_sec_per_km) for s in steps)
-        )
-        workout = RunningWorkout(
-            workoutName=name,
-            estimatedDurationInSecs=estimated_duration,
-            workoutSegments=[segment],
-        )
+        try:
+            order = [0]
+            workout_steps = [_build_workout_step(s, order) for s in steps]
+            segment = {
+                "segmentOrder": 1,
+                "sportType": {"sportTypeId": 1, "sportTypeKey": "running", "displayOrder": 1},
+                "workoutSteps": workout_steps,
+            }
+            estimated_duration = int(
+                sum(_estimate_step_duration_seconds(s, pace_sec_per_km) for s in steps)
+            )
+            workout = RunningWorkout(
+                workoutName=name,
+                estimatedDurationInSecs=estimated_duration,
+                workoutSegments=[segment],
+            )
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
         result = client_call("upload_running_workout", workout)
         if result["ok"] and isinstance(result["data"], dict):
             result["data"]["workout_id"] = result["data"].get("workoutId")
@@ -734,33 +776,36 @@ def register(mcp: FastMCP) -> None:
         """
         from garminconnect.workout import FitnessEquipmentWorkout
 
-        for exercise in exercises:
-            if "sets" not in exercise or "rest_seconds" not in exercise:
-                raise ValueError(f"Exercise {exercise!r} must set 'sets' and 'rest_seconds'")
+        try:
+            for exercise in exercises:
+                if "sets" not in exercise or "rest_seconds" not in exercise:
+                    raise ValueError(f"Exercise {exercise!r} must set 'sets' and 'rest_seconds'")
 
-        # sportTypeId 5 / "strength_training" - confirmed live: garminconnect's
-        # FitnessEquipmentWorkout class defaults to {6, "fitness_equipment"}, which Garmin's
-        # own backend actually echoes back as "cardio_training", not a strength workout at
-        # all (same class of bug as the earlier distance/lap.button mismatch). The correct
-        # sportType was confirmed by inspecting a workout hand-built via Garmin Connect's own
-        # UI with garmin_list_workouts, which showed {5, "strength_training"}.
-        STRENGTH_SPORT_TYPE = {"sportTypeId": 5, "sportTypeKey": "strength_training", "displayOrder": 5}
+            # sportTypeId 5 / "strength_training" - confirmed live: garminconnect's
+            # FitnessEquipmentWorkout class defaults to {6, "fitness_equipment"}, which Garmin's
+            # own backend actually echoes back as "cardio_training", not a strength workout at
+            # all (same class of bug as the earlier distance/lap.button mismatch). The correct
+            # sportType was confirmed by inspecting a workout hand-built via Garmin Connect's own
+            # UI with garmin_list_workouts, which showed {5, "strength_training"}.
+            STRENGTH_SPORT_TYPE = {"sportTypeId": 5, "sportTypeKey": "strength_training", "displayOrder": 5}
 
-        order = [0]
-        fallbacks: list[dict] = []
-        workout_steps = [_build_strength_round(e, order, fallbacks) for e in exercises]
-        segment = {
-            "segmentOrder": 1,
-            "sportType": STRENGTH_SPORT_TYPE,
-            "workoutSteps": workout_steps,
-        }
-        estimated_duration = int(sum(_estimate_strength_duration_seconds(e) for e in exercises))
-        workout = FitnessEquipmentWorkout(
-            workoutName=name,
-            sportType=STRENGTH_SPORT_TYPE,
-            estimatedDurationInSecs=estimated_duration,
-            workoutSegments=[segment],
-        )
+            order = [0]
+            fallbacks: list[dict] = []
+            workout_steps = [_build_strength_round(e, order, fallbacks) for e in exercises]
+            segment = {
+                "segmentOrder": 1,
+                "sportType": STRENGTH_SPORT_TYPE,
+                "workoutSteps": workout_steps,
+            }
+            estimated_duration = int(sum(_estimate_strength_duration_seconds(e) for e in exercises))
+            workout = FitnessEquipmentWorkout(
+                workoutName=name,
+                sportType=STRENGTH_SPORT_TYPE,
+                estimatedDurationInSecs=estimated_duration,
+                workoutSegments=[segment],
+            )
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
         result = client_call("upload_workout", workout.to_dict())
         if result["ok"] and isinstance(result["data"], dict):
             result["data"]["workout_id"] = result["data"].get("workoutId")
