@@ -849,6 +849,14 @@ def register(mcp: FastMCP) -> None:
         """Schedule a previously-created Garmin workout onto a specific calendar date so it syncs to the watch. workout_id: from garmin_create_running_workout. date: YYYY-MM-DD."""
         return client_call("schedule_workout", workout_id, date)
 
+    @mcp.tool(name="garmin_get_scheduled_workouts")
+    def get_scheduled_workouts(year: str = "", month: str = "") -> dict:
+        """Get all workouts scheduled on the Garmin calendar for a given month, raw from Garmin. year/month: default to the current year/month. Prefer garmin_get_workouts_scheduled_on for a specific day's schedule - this is the lower-level month view it's built on."""
+        d = date.today()
+        y = int(year) if year else d.year
+        m = int(month) if month else d.month
+        return client_call("get_scheduled_workouts", y, m)
+
     @mcp.tool(name="garmin_list_workouts")
     def list_workouts(limit: int = 20) -> dict:
         """List workouts stored in Garmin Connect (most recently created first). limit: max results (default 20)."""
