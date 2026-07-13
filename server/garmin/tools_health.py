@@ -73,7 +73,7 @@ def register(mcp: FastMCP) -> None:
     # ── Trends / history ─────────────────────────────────────────────────────
     @mcp.tool(name="garmin_get_sleep_history")
     def get_sleep_history(days: int = 14) -> dict:
-        """Get sleep scores and stage breakdown for the past N days to identify trends. days: number of past days (default 14, max 28)."""
+        """Get sleep scores and stage breakdown for the past N days to identify trends. Returns per-day summary stats only (durations, sleep score, avg HR/respiration) - not minute-by-minute sleep movement/HR/stress/HRV arrays; use garmin_get_sleep for one night's full detail. days: number of past days (default 14, max 28)."""
         client, err = safe_get_client()
         if err:
             return err
@@ -83,12 +83,31 @@ def register(mcp: FastMCP) -> None:
             day = days_ago(i)
             r = safe_call(client.get_sleep_data, day)
             if r["ok"] and r["data"]:
-                history.append({"date": day, "data": r["data"]})
+                dto = r["data"].get("dailySleepDTO") or {}
+                history.append(
+                    {
+                        "date": day,
+                        "data": {
+                            "sleepTimeSeconds": dto.get("sleepTimeSeconds"),
+                            "deepSleepSeconds": dto.get("deepSleepSeconds"),
+                            "lightSleepSeconds": dto.get("lightSleepSeconds"),
+                            "remSleepSeconds": dto.get("remSleepSeconds"),
+                            "awakeSleepSeconds": dto.get("awakeSleepSeconds"),
+                            "sleepScores": dto.get("sleepScores"),
+                            "avgHeartRate": dto.get("avgHeartRate"),
+                            "averageRespirationValue": dto.get("averageRespirationValue"),
+                            "avgSleepStress": dto.get("avgSleepStress"),
+                            "avgOvernightHrv": r["data"].get("avgOvernightHrv"),
+                            "restingHeartRate": r["data"].get("restingHeartRate"),
+                            "bodyBatteryChange": r["data"].get("bodyBatteryChange"),
+                        },
+                    }
+                )
         return {"ok": True, "data": history}
 
     @mcp.tool(name="garmin_get_hrv_history")
     def get_hrv_history(days: int = 14) -> dict:
-        """Get overnight HRV values for the past N days to track recovery trends. days: number of past days (default 14, max 28)."""
+        """Get overnight HRV values for the past N days to track recovery trends. Returns per-night summary (weekly avg, last-night avg, baseline, status) - not the raw 5-minute HRV readings; use garmin_get_hrv for one night's full detail. days: number of past days (default 14, max 28)."""
         client, err = safe_get_client()
         if err:
             return err
@@ -98,7 +117,7 @@ def register(mcp: FastMCP) -> None:
             day = days_ago(i)
             r = safe_call(client.get_hrv_data, day)
             if r["ok"] and r["data"]:
-                history.append({"date": day, "data": r["data"]})
+                history.append({"date": day, "data": r["data"].get("hrvSummary")})
         return {"ok": True, "data": history}
 
     @mcp.tool(name="garmin_get_body_battery_history")
