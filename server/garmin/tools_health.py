@@ -1,0 +1,142 @@
+"""Daily health, lifestyle/habits, and body/weight Garmin tools."""
+
+from mcp.server.fastmcp import FastMCP
+
+from .client import client_call, days_ago, safe_call, safe_get_client, today_str
+from .workout_builders import _lifestyle_log, _lifestyle_log_history
+
+
+def register(mcp: FastMCP) -> None:
+    # ── Daily health ─────────────────────────────────────────────────────────
+    @mcp.tool(name="garmin_get_sleep")
+    def get_sleep(date: str = "") -> dict:
+        """Get detailed sleep data for a given date: sleep stages (deep, light, REM, awake), total sleep duration, sleep score, respiration, SpO2, and sleep start/end times. date: YYYY-MM-DD, defaults to today."""
+        return client_call("get_sleep_data", date or today_str())
+
+    @mcp.tool(name="garmin_get_hrv")
+    def get_hrv(date: str = "") -> dict:
+        """Get Heart Rate Variability (HRV) data for a date: overnight HRV summary, 5-minute readings, baseline, and status (Balanced / Unbalanced / Low). date: YYYY-MM-DD, defaults to today."""
+        return client_call("get_hrv_data", date or today_str())
+
+    @mcp.tool(name="garmin_get_body_battery")
+    def get_body_battery(date: str = "") -> dict:
+        """Get Body Battery levels for a date: charging/draining events, start/end levels, and the impact of sleep and activities. date: YYYY-MM-DD, defaults to today."""
+        d = date or today_str()
+        return client_call("get_body_battery", d, d)
+
+    @mcp.tool(name="garmin_get_stress")
+    def get_stress(date: str = "") -> dict:
+        """Get stress data for a date: average stress, max stress, rest stress, and time in low/medium/high/rest stress categories. date: YYYY-MM-DD, defaults to today."""
+        return client_call("get_stress_data", date or today_str())
+
+    @mcp.tool(name="garmin_get_heart_rate")
+    def get_heart_rate(date: str = "") -> dict:
+        """Get resting heart rate and heart rate timeline for a date: min HR, max HR, resting HR, and timestamped readings throughout the day. date: YYYY-MM-DD, defaults to today."""
+        return client_call("get_heart_rates", date or today_str())
+
+    @mcp.tool(name="garmin_get_spo2")
+    def get_spo2(date: str = "") -> dict:
+        """Get SpO2 (blood oxygen saturation) readings for a date: average, min, max, and overnight continuous readings. date: YYYY-MM-DD, defaults to today."""
+        return client_call("get_spo2_data", date or today_str())
+
+    @mcp.tool(name="garmin_get_respiration")
+    def get_respiration(date: str = "") -> dict:
+        """Get breathing rate (respiration) data for a date: average, min, max breaths per minute throughout the day and overnight. date: YYYY-MM-DD, defaults to today."""
+        return client_call("get_respiration_data", date or today_str())
+
+    @mcp.tool(name="garmin_get_steps_and_activity")
+    def get_steps_and_activity(date: str = "") -> dict:
+        """Get daily steps, floors climbed, distance, calories (active + resting), and intensity minutes for a date. date: YYYY-MM-DD, defaults to today."""
+        d = date or today_str()
+        client, err = safe_get_client()
+        if err:
+            return err
+        steps = safe_call(client.get_steps_data, d)
+        stats = safe_call(client.get_stats, d)
+        return {"ok": True, "data": {"steps": steps.get("data"), "stats": stats.get("data")}}
+
+    @mcp.tool(name="garmin_get_hydration")
+    def get_hydration(date: str = "") -> dict:
+        """Get daily hydration data: fluid intake in ml and goal for a date. date: YYYY-MM-DD, defaults to today."""
+        return client_call("get_hydration_data", date or today_str())
+
+    @mcp.tool(name="garmin_get_daily_summary")
+    def get_daily_summary(date: str = "") -> dict:
+        """Get a comprehensive daily summary including steps, calories, HR, stress, Body Battery, intensity minutes, and floors for a date. Good all-in-one snapshot. date: YYYY-MM-DD, defaults to today."""
+        return client_call("get_user_summary", date or today_str())
+
+    @mcp.tool(name="garmin_get_weekly_summary")
+    def get_weekly_summary(end_date: str = "") -> dict:
+        """Get a weekly health and activity summary: total steps, active calories, intensity minutes, stress average, and sleep averages for the past 7 days. end_date: YYYY-MM-DD, defaults to today."""
+        return client_call("get_weekly_stress", end_date or today_str())
+
+    # ── Trends / history ─────────────────────────────────────────────────────
+    @mcp.tool(name="garmin_get_sleep_history")
+    def get_sleep_history(days: int = 14) -> dict:
+        """Get sleep scores and stage breakdown for the past N days to identify trends. days: number of past days (default 14, max 28)."""
+        client, err = safe_get_client()
+        if err:
+            return err
+        n = min(days, 28)
+        history = []
+        for i in range(n):
+            day = days_ago(i)
+            r = safe_call(client.get_sleep_data, day)
+            if r["ok"] and r["data"]:
+                history.append({"date": day, "data": r["data"]})
+        return {"ok": True, "data": history}
+
+    @mcp.tool(name="garmin_get_hrv_history")
+    def get_hrv_history(days: int = 14) -> dict:
+        """Get overnight HRV values for the past N days to track recovery trends. days: number of past days (default 14, max 28)."""
+        client, err = safe_get_client()
+        if err:
+            return err
+        n = min(days, 28)
+        history = []
+        for i in range(n):
+            day = days_ago(i)
+            r = safe_call(client.get_hrv_data, day)
+            if r["ok"] and r["data"]:
+                history.append({"date": day, "data": r["data"]})
+        return {"ok": True, "data": history}
+
+    @mcp.tool(name="garmin_get_body_battery_history")
+    def get_body_battery_history(days: int = 14) -> dict:
+        """Get end-of-day Body Battery levels for the past N days to track energy trends. days: number of past days (default 14, max 28)."""
+        client, err = safe_get_client()
+        if err:
+            return err
+        n = min(days, 28)
+        history = []
+        for i in range(n):
+            day = days_ago(i)
+            r = safe_call(client.get_body_battery, day, day)
+            if r["ok"] and r["data"]:
+                history.append({"date": day, "data": r["data"]})
+        return {"ok": True, "data": history}
+
+    # ── Lifestyle / habits ───────────────────────────────────────────────────
+    @mcp.tool(name="garmin_get_lifestyle_log")
+    def get_lifestyle_log(date: str = "") -> dict:
+        """Get the lifestyle/habit log for a date: which manually-tracked habits (e.g. healthy meals, morning caffeine, moderate exercise, ankle exercises) were logged that day and whether each was completed. date: YYYY-MM-DD, defaults to today."""
+        client, err = safe_get_client()
+        if err:
+            return err
+        return safe_call(_lifestyle_log, client, date or today_str())
+
+    @mcp.tool(name="garmin_get_lifestyle_log_history")
+    def get_lifestyle_log_history(start_date: str, end_date: str = "") -> dict:
+        """Get lifestyle/habit log compliance across a date range, as a day-by-day table showing whether each tracked habit was done, missed, or not logged. start_date: YYYY-MM-DD, required. end_date: YYYY-MM-DD, defaults to today."""
+        client, err = safe_get_client()
+        if err:
+            return err
+        return safe_call(_lifestyle_log_history, client, start_date, end_date or today_str())
+
+    # ── Body & weight ────────────────────────────────────────────────────────
+    @mcp.tool(name="garmin_get_weight")
+    def get_weight(start_date: str = "", end_date: str = "") -> dict:
+        """Get body weight and composition data for a date range. Returns weight, BMI, body fat % if measured. start_date/end_date: YYYY-MM-DD, default to 14 days ago / today."""
+        start = start_date or days_ago(14)
+        end = end_date or today_str()
+        return client_call("get_body_composition", start, end)

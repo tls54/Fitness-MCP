@@ -19,7 +19,7 @@ from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 
-import garmin_tools
+import garmin
 import strava_tools
 from oauth_provider import SingleUserOAuthProvider
 
@@ -52,7 +52,7 @@ def build_app() -> Starlette:
     # access control for /mcp now.
     mcp.settings.transport_security.enable_dns_rebinding_protection = False
 
-    garmin_tools.register(mcp)
+    garmin.register(mcp)
     strava_tools.register(mcp)
 
     @mcp.custom_route("/login", methods=["GET"])
