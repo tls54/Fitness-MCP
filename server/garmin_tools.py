@@ -857,6 +857,29 @@ def register(mcp: FastMCP) -> None:
         m = int(month) if month else d.month
         return client_call("get_scheduled_workouts", y, m)
 
+    @mcp.tool(name="garmin_get_workouts_scheduled_on")
+    def get_workouts_scheduled_on(target_date: str = "") -> dict:
+        """Get the workout(s) scheduled on the Garmin calendar for a specific date - use this to answer "what do I have scheduled today/tomorrow/on X?". target_date: YYYY-MM-DD, defaults to today. Returns each scheduled workout's title, sport, workout_id (for garmin_get_workout_by_id), and the scheduled-item id (for garmin_unschedule_workout). Only calendar entries that are actual workouts are included - weigh-ins and other calendar item types are filtered out."""
+        d = date.fromisoformat(target_date) if target_date else date.today()
+        result = client_call("get_scheduled_workouts", d.year, d.month)
+        if not result["ok"]:
+            return result
+
+        target_str = d.isoformat()
+        items = result["data"].get("calendarItems") or []
+        workouts = [
+            {
+                "scheduled_item_id": item.get("id"),
+                "workout_id": item.get("workoutId"),
+                "title": item.get("title"),
+                "sport": item.get("sportTypeKey"),
+                "date": item.get("date"),
+            }
+            for item in items
+            if item.get("itemType") == "workout" and item.get("date") == target_str
+        ]
+        return {"ok": True, "data": workouts}
+
     @mcp.tool(name="garmin_list_workouts")
     def list_workouts(limit: int = 20) -> dict:
         """List workouts stored in Garmin Connect (most recently created first). limit: max results (default 20)."""
@@ -866,6 +889,11 @@ def register(mcp: FastMCP) -> None:
     def delete_workout(workout_id: str) -> dict:
         """Delete a workout from Garmin Connect by its workout_id."""
         return client_call("delete_workout", workout_id)
+
+    @mcp.tool(name="garmin_unschedule_workout")
+    def unschedule_workout(scheduled_item_id: str) -> dict:
+        """Remove a workout from a specific calendar date without deleting the workout template itself (it stays available to reschedule). scheduled_item_id: from garmin_get_workouts_scheduled_on's "scheduled_item_id" field - NOT the same as workout_id."""
+        return client_call("unschedule_workout", scheduled_item_id)
 
     @mcp.tool(name="garmin_get_workout_by_id")
     def get_workout_by_id(workout_id: str) -> dict:
