@@ -67,8 +67,60 @@ def register(mcp: FastMCP) -> None:
 
     @mcp.tool(name="garmin_get_weekly_summary")
     def get_weekly_summary(end_date: str = "") -> dict:
-        """Get a weekly health and activity summary: total steps, active calories, intensity minutes, stress average, and sleep averages for the past 7 days. end_date: YYYY-MM-DD, defaults to today."""
-        return client_call("get_weekly_stress", end_date or today_str())
+        """Get a weekly health and activity summary for the 7 days ending on end_date: total steps, active calories, total intensity minutes, average stress, average resting HR, and average sleep hours. end_date: YYYY-MM-DD, defaults to today."""
+        from datetime import date, timedelta
+
+        client, err = safe_get_client()
+        if err:
+            return err
+
+        end = date.fromisoformat(end_date) if end_date else date.today()
+        days = [(end - timedelta(days=i)).isoformat() for i in range(7)]
+
+        total_steps = 0
+        active_calories = 0.0
+        moderate_minutes = 0
+        vigorous_minutes = 0
+        stress_values = []
+        resting_hr_values = []
+        sleep_hours_values = []
+
+        for day in days:
+            summary = safe_call(client.get_user_summary, day)
+            if summary["ok"] and summary["data"]:
+                d = summary["data"]
+                total_steps += d.get("totalSteps") or 0
+                active_calories += d.get("activeKilocalories") or 0
+                moderate_minutes += d.get("moderateIntensityMinutes") or 0
+                vigorous_minutes += d.get("vigorousIntensityMinutes") or 0
+                if d.get("averageStressLevel") is not None and d["averageStressLevel"] >= 0:
+                    stress_values.append(d["averageStressLevel"])
+                if d.get("restingHeartRate"):
+                    resting_hr_values.append(d["restingHeartRate"])
+
+            sleep = safe_call(client.get_sleep_data, day)
+            if sleep["ok"] and sleep["data"]:
+                seconds = (sleep["data"].get("dailySleepDTO") or {}).get("sleepTimeSeconds")
+                if seconds:
+                    sleep_hours_values.append(seconds / 3600)
+
+        def avg(values):
+            return round(sum(values) / len(values), 1) if values else None
+
+        return {
+            "ok": True,
+            "data": {
+                "start_date": days[-1],
+                "end_date": days[0],
+                "total_steps": total_steps,
+                "total_active_calories": round(active_calories),
+                "total_moderate_intensity_minutes": moderate_minutes,
+                "total_vigorous_intensity_minutes": vigorous_minutes,
+                "avg_stress_level": avg(stress_values),
+                "avg_resting_heart_rate": avg(resting_hr_values),
+                "avg_sleep_hours": avg(sleep_hours_values),
+            },
+        }
 
     # ── Trends / history ─────────────────────────────────────────────────────
     @mcp.tool(name="garmin_get_sleep_history")
