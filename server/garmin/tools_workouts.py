@@ -1,6 +1,7 @@
 """Workout creation/scheduling/management and exercise-lookup Garmin tools."""
 
 from datetime import date
+from datetime import date as date_cls
 
 from mcp.server.fastmcp import FastMCP
 
@@ -183,23 +184,10 @@ def register(mcp: FastMCP) -> None:
         """Schedule a previously-created Garmin workout onto a specific calendar date so it syncs to the watch. workout_id: from garmin_create_running_workout. date: YYYY-MM-DD."""
         return client_call("schedule_workout", workout_id, date)
 
-    @mcp.tool(name="garmin_get_scheduled_workouts")
-    def get_scheduled_workouts(year: str = "", month: str = "") -> dict:
-        """Get all workouts scheduled on the Garmin calendar for a given month, raw from Garmin. year/month: default to the current year/month. Prefer garmin_get_workouts_scheduled_on for a specific day's schedule - this is the lower-level month view it's built on."""
-        d = date.today()
-        y = int(year) if year else d.year
-        m = int(month) if month else d.month
-        return client_call("get_scheduled_workouts", y, m)
-
-    @mcp.tool(name="garmin_get_workouts_scheduled_on")
-    def get_workouts_scheduled_on(target_date: str = "") -> dict:
-        """Get the workout(s) scheduled on the Garmin calendar for a specific date - use this to answer "what do I have scheduled today/tomorrow/on X?". target_date: YYYY-MM-DD, defaults to today. Returns each scheduled workout's title, sport, workout_id (for garmin_get_workout_by_id), and the scheduled-item id (for garmin_unschedule_workout). Only calendar entries that are actual workouts are included - weigh-ins and other calendar item types are filtered out."""
-        d = date.fromisoformat(target_date) if target_date else date.today()
-        result = client_call("get_scheduled_workouts", d.year, d.month)
+    def _scheduled_workouts_for_month(year: int, month: int) -> dict:
+        result = client_call("get_scheduled_workouts", year, month)
         if not result["ok"]:
             return result
-
-        target_str = d.isoformat()
         items = result["data"].get("calendarItems") or []
         workouts = [
             {
@@ -210,9 +198,24 @@ def register(mcp: FastMCP) -> None:
                 "date": item.get("date"),
             }
             for item in items
-            if item.get("itemType") == "workout" and item.get("date") == target_str
+            if item.get("itemType") == "workout"
         ]
         return {"ok": True, "data": workouts}
+
+    @mcp.tool(name="garmin_get_scheduled_workouts")
+    def get_scheduled_workouts(target_date: str = "", year: str = "", month: str = "") -> dict:
+        """Get workout(s) scheduled on the Garmin calendar. Pass target_date to answer "what do I have scheduled today/tomorrow/on X?" (returns just that day's workouts). Omit target_date and optionally pass year/month to get the whole month's schedule instead (defaults to the current month). Each entry has title, sport, workout_id (for garmin_get_workout_by_id), and scheduled_item_id (for garmin_unschedule_workout). Only calendar entries that are actual workouts are included - weigh-ins and other calendar item types are filtered out."""
+        if target_date:
+            d = date.fromisoformat(target_date)
+        else:
+            d = date.today()
+        y = int(year) if year else d.year
+        m = int(month) if month else d.month
+        result = _scheduled_workouts_for_month(y, m)
+        if not result["ok"] or not target_date:
+            return result
+        target_str = d.isoformat()
+        return {"ok": True, "data": [w for w in result["data"] if w["date"] == target_str]}
 
     @mcp.tool(name="garmin_list_workouts")
     def list_workouts(limit: int = 20) -> dict:
@@ -225,9 +228,16 @@ def register(mcp: FastMCP) -> None:
         return client_call("delete_workout", workout_id)
 
     @mcp.tool(name="garmin_unschedule_workout")
-    def unschedule_workout(scheduled_item_id: str) -> dict:
-        """Remove a workout from a specific calendar date without deleting the workout template itself (it stays available to reschedule). scheduled_item_id: from garmin_get_workouts_scheduled_on's "scheduled_item_id" field - NOT the same as workout_id."""
-        return client_call("unschedule_workout", scheduled_item_id)
+    def unschedule_workout(workout_id: str, date: str) -> dict:
+        """Remove a workout from a specific calendar date without deleting the workout template itself (it stays available to reschedule). workout_id: from garmin_create_running_workout/garmin_create_strength_workout/garmin_list_workouts. date: YYYY-MM-DD, the calendar date it's scheduled on (from garmin_get_scheduled_workouts)."""
+        d = date_cls.fromisoformat(date)
+        result = _scheduled_workouts_for_month(d.year, d.month)
+        if not result["ok"]:
+            return result
+        match = next((w for w in result["data"] if str(w["workout_id"]) == workout_id and w["date"] == date), None)
+        if not match:
+            return {"ok": False, "error": f"No workout {workout_id} found scheduled on {date}"}
+        return client_call("unschedule_workout", match["scheduled_item_id"])
 
     @mcp.tool(name="garmin_get_workout_by_id")
     def get_workout_by_id(workout_id: str) -> dict:
