@@ -49,6 +49,42 @@ def days_ago(n: int) -> str:
     return (date.today() - timedelta(days=n)).isoformat()
 
 
+_SPEED_TO_PACE_KEYS = {
+    "averageSpeed": "averagePaceMinPerKm",
+    "maxSpeed": "maxPaceMinPerKm",
+    "averageMovingSpeed": "averageMovingPaceMinPerKm",
+    "avgGradeAdjustedSpeed": "gradeAdjustedPaceMinPerKm",
+}
+
+
+def speed_to_pace_str(speed_mps) -> str | None:
+    """Converts m/s to a "M:SS" pace-per-km string. Not meaningful at zero/near-zero
+    speed (stopped/paused), so those return None rather than a nonsensical huge pace."""
+    if not isinstance(speed_mps, (int, float)) or speed_mps < 0.1:
+        return None
+    sec_per_km = 1000 / speed_mps
+    minutes, seconds = divmod(round(sec_per_km), 60)
+    return f"{minutes}:{seconds:02d}"
+
+
+def convert_speeds_to_pace(obj):
+    """Recursively replaces known m/s speed fields (averageSpeed, maxSpeed,
+    averageMovingSpeed, avgGradeAdjustedSpeed) with M:SS/km pace fields, anywhere they
+    appear in a nested dict/list Garmin response. Leaves vertical-speed fields
+    (maxVerticalSpeed etc.) untouched since "pace" isn't meaningful for those."""
+    if isinstance(obj, dict):
+        result = {}
+        for key, value in obj.items():
+            if key in _SPEED_TO_PACE_KEYS and isinstance(value, (int, float)):
+                result[_SPEED_TO_PACE_KEYS[key]] = speed_to_pace_str(value)
+            else:
+                result[key] = convert_speeds_to_pace(value)
+        return result
+    if isinstance(obj, list):
+        return [convert_speeds_to_pace(item) for item in obj]
+    return obj
+
+
 def safe_call(fn, *args, **kwargs) -> dict:
     try:
         result = fn(*args, **kwargs)
